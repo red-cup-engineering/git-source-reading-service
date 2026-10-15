@@ -1,0 +1,15 @@
+{
+  "name": "@red-cup-engineering/git-source-reading-service",
+  "version": "0.1.0",
+  "private": false,
+  "type": "module",
+  "description": "Read authored files from explicitly scoped, composed Git repositories using native Git object and configuration readers.",
+  "exports": "./src/read-source-files.mjs",
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=22.18"
+  }
+}
