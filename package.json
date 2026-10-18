@@ -4,6 +4,11 @@
   "private": false,
   "type": "module",
   "description": "Read authored files from explicitly scoped, composed Git repositories using native Git object and configuration readers.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/red-cup-engineering/git-services-section.git",
+    "directory": "services/git-source-reading-service"
+  },
   "exports": "./src/read-source-files.mjs",
   "files": [
     "src",
