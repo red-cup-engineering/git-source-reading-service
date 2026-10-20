@@ -1,6 +1,6 @@
 {
   "name": "@red-cup-engineering/git-source-reading-service",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "private": false,
   "type": "module",
   "description": "Read authored files from explicitly scoped, composed Git repositories using native Git object and configuration readers.",
@@ -8,12 +8,23 @@
     "type": "git",
     "url": "git+https://github.com/red-cup-engineering/git-source-reading-service.git"
   },
-  "exports": "./src/read-source-files.mjs",
+  "exports": {
+    ".": "./src/read-source-files.mjs",
+    "./pinned-source-files": "./src/pinned-source-files.mjs",
+    "./git-command-codec": "./src/git-command-codec.mjs",
+    "./gitmodules": "./src/gitmodules.mjs",
+    "./source-working-copy-schema": "./src/source-working-copy-schema.mjs"
+  },
   "files": [
     "src",
     "README.md"
   ],
   "engines": {
     "node": ">=22.18"
+  },
+  "scripts": {
+    "check": "node --check src/read-source-files.mjs && node --check src/pinned-source-files.mjs && node --check src/git-command-codec.mjs && node --check src/gitmodules.mjs && node --check src/source-working-copy-schema.mjs",
+    "test": "node --test test/*.test.mjs",
+    "verify": "npm run check && npm test"
   }
 }
