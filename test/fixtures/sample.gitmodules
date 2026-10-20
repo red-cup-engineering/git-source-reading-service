@@ -1,0 +1,9 @@
+[submodule "lib/emsenn/services/561-group/services/lenticule-science/services/obsmetrological-services-section"]
+	path = lib/emsenn/services/561-group/services/lenticule-science/services/obsmetrological-services-section
+	url = https://github.com/emsenn/obsmetrological-services-section.git
+[submodule "lib/emsenn/services/561-group/services/red-cup-engineering"]
+	path = lib/emsenn/services/561-group/services/red-cup-engineering
+	url = https://github.com/emsenn/red-cup-engineering.git
+[submodule "lib/emsenn/services/561-group/services/rsc-quiescent/services/web2-services-section/discord-services-section/turntide-islands"]
+	path = lib/emsenn/services/561-group/services/rsc-quiescent/services/web2-services-section/discord-services-section/turntide-islands
+	url = https://github.com/emsenn/turntide-islands.git
