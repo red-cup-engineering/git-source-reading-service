@@ -23,6 +23,15 @@ caller's resolver; `update=none` and unselected mounts remain outside compositio
 The caller owns absolute disposable scratch and repository credentials. This API
 grants no access, installation, publication or branch-selection authority.
 
+The exact-commit reader supports full lowercase SHA-1 (40 hexadecimal characters)
+and SHA-256 (64 hexadecimal characters) identities. Each disposable object store
+is initialized with native Git's explicit matching `--object-format`, and its
+actual storage format is received before fetching. An ambient `GIT_DEFAULT_HASH`
+cannot choose another format. Native Git still owns commit/blob verification and
+refuses incompatible or unavailable remote objects; this does not translate
+identities between formats or permit abbreviated revisions. A reader may receive
+separate repositories of either format without sharing their stores.
+
 Strict receivers set `rejectSelectedNonRegular:true`; selected unsupported kinds
 refuse instead of silently disappearing. Defaults preserve regular-file-only
 behavior. Raw Git tree paths decode with fatal UTF-8 before selection. Finite

@@ -59,7 +59,10 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
           throw new TypeError("a repository environment provider must return an environment object");
         repositoryEnvironments.set(gitDir, { ...supplied });
         await mkdir(scratch, { recursive: true });
-        await run(["init", "--bare", "--quiet", gitDir]);
+        const objectFormat = commit.length === 40 ? "sha1" : "sha256";
+        await run(["init", "--bare", "--quiet", "--object-format=" + objectFormat, gitDir]);
+        const storedFormat = (await run(["rev-parse", "--show-object-format=storage"], { gitDir })).toString("utf8").trim();
+        if (storedFormat !== objectFormat) throw new Error("pinned source storage format differs from its exact object identity");
         await run(["config", "remote.origin.url", repository], { gitDir });
         await run(["config", "remote.origin.promisor", "true"], { gitDir });
         await run(["config", "remote.origin.partialclonefilter", "blob:none"], { gitDir });
