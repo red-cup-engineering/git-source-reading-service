@@ -26,5 +26,10 @@
     "check": "node --check src/read-source-files.mjs && node --check src/pinned-source-files.mjs && node --check src/git-command-codec.mjs && node --check src/gitmodules.mjs && node --check src/source-working-copy-schema.mjs",
     "test": "node --test test/*.test.mjs",
     "verify": "npm run check && npm test"
+  },
+  "license": "MIT",
+  "funding": {
+    "type": "individual",
+    "url": "https://github.com/561-group/.github/blob/main/TIPS.md"
   }
 }
