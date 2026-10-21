@@ -1,18 +1,18 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, chmod, rm, symlink } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, chmod, rm, symlink, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPinnedSourceReader } from "../src/pinned-source-files.mjs";
 
 const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
-async function fixture(t) {
+async function fixture(t, objectFormat = "sha1") {
   const root = await mkdtemp(join(tmpdir(), "git-pinned-source-"));
   t.after(() => rm(root, { recursive: true, force: true }));
   const repository = async (name, files) => {
     const dir = join(root, name); await mkdir(dir);
-    git(dir, "init", "-q"); git(dir, "config", "user.name", "Source fixture"); git(dir, "config", "user.email", "source@example.invalid");
+    git(dir, "init", "-q", "--object-format=" + objectFormat); git(dir, "config", "user.name", "Source fixture"); git(dir, "config", "user.email", "source@example.invalid");
     for (const [path, bytes] of Object.entries(files)) {
       const file = join(dir, path); await mkdir(join(file, ".."), { recursive: true }); await writeFile(file, bytes);
     }
@@ -159,4 +159,59 @@ test("native Git tree byte decoding preserves Unicode and refuses a committed in
 
 test("strict file-kind receiving is an explicit boolean before source acquisition", () => {
   assert.throws(() => createPinnedSourceReader({ scratch: "/unused", rejectSelectedNonRegular: "true" }), /must be boolean/u);
+});
+
+for (const objectFormat of ["sha1", "sha256"]) {
+  test("native " + objectFormat + " receives exact composed source despite a contradictory ambient default", async t => {
+    const f = await fixture(t, objectFormat), scratch = join(f.root, "received-format");
+    const read = createPinnedSourceReader({ scratch, rejectSelectedNonRegular: true,
+      environment: { GIT_DEFAULT_HASH: objectFormat === "sha1" ? "sha256" : "sha1" },
+      resolveSubmodule: ({ commit }) => { assert.equal(commit, f.child.commit); return f.child.dir; } });
+    const rows = await read(f.selection), width = objectFormat === "sha1" ? 40 : 64;
+    assert.equal(f.parent.commit.length, width);
+    assert.equal(rows[1].mode, "100755");
+    assert.equal(rows[1].bytes.toString(), "export const received = 'pinned';\n");
+    assert.deepEqual([...rows[0].bytes], [0, 255, 128]);
+    assert.equal(rows[1].source.commit, f.child.commit);
+    assert.equal(rows[1].source.object, git(f.child.dir, "rev-parse", f.child.commit + ":src/index.mjs"));
+    for (const row of rows) {
+      assert.equal(row.source.commit.length, width);
+      assert.equal(row.source.object.length, width);
+    }
+    for (const store of ["0.git", "1.git"])
+      assert.equal(git(f.root, "--git-dir", join(scratch, store), "rev-parse", "--show-object-format=storage"), objectFormat);
+    const scoped = await read({ ...f.selection, scope: "lib/semantic", selectFile: path => path.startsWith("src/"), enterDirectory: () => false });
+    assert.deepEqual(scoped.map(row => row.path), ["src/image.bin", "src/index.mjs"]);
+    assert.equal(scoped[1].source.object, rows[1].source.object);
+  });
+}
+
+test("one reader keeps independently selected native SHA1 and SHA256 stores separate", async t => {
+  const first = await fixture(t, "sha1"), second = await fixture(t, "sha256");
+  const scratch = join(first.root, "mixed-format-stores");
+  const read = createPinnedSourceReader({ scratch, rejectSelectedNonRegular: true,
+    resolveSubmodule: ({ commit }) => commit === first.child.commit ? first.child.dir : second.child.dir });
+  const a = await read(first.selection), b = await read(second.selection);
+  assert.equal(a[1].source.commit, first.child.commit);
+  assert.equal(b[1].source.commit, second.child.commit);
+  assert.deepEqual(a.map(row => row.bytes), b.map(row => row.bytes));
+  for (const [store, expected] of [["0.git", "sha1"], ["1.git", "sha1"], ["2.git", "sha256"], ["3.git", "sha256"]])
+    assert.equal(git(first.root, "--git-dir", join(scratch, store), "rev-parse", "--show-object-format=storage"), expected);
+  assert.deepEqual(await read(first.selection), a);
+});
+
+test("malformed SHA256 identities refuse before creating a disposable object store", async t => {
+  const root = await mkdtemp(join(tmpdir(), "git-format-admission-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scratch = join(root, "uncreated"), read = createPinnedSourceReader({ scratch });
+  for (const commit of ["a".repeat(63), "a".repeat(65), "A".repeat(64), ["a".repeat(64)]])
+    await assert.rejects(read({ repository: "/absent", commit, selectFile: () => true, enterDirectory: () => false }), /exact commit/u);
+  await assert.rejects(lstat(scratch), { code: "ENOENT" });
+});
+
+test("a SHA256 source cannot be received through a truncated SHA1-shaped identity", async t => {
+  const f = await fixture(t, "sha256"), scratch = join(f.root, "foreign-format-store");
+  const read = createPinnedSourceReader({ scratch });
+  await assert.rejects(read({ ...f.selection, commit: f.parent.commit.slice(0, 40) }));
+  assert.equal(git(f.root, "--git-dir", join(scratch, "0.git"), "rev-parse", "--show-object-format=storage"), "sha1");
 });
