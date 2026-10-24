@@ -83,3 +83,69 @@ manoomin Science are the original receiving consumers for this extension.
 
 
 The pinned-source-files entrance also exports receivePinnedRepositoryCommitSync and readGitBlobObjectsSync for an owner that already holds a repository or its original bare cache. They share the asynchronous reader native fetch plans and binary codec. Commit receiving is blobless; blob reading is local-only by default, with explicit missing-selected-object receiving through the original origin. Both adapters keep finite time, path and byte limits and create no checkout, worktree, branch or copied code tree.
+## Disposable native source construction (version 1)
+
+Requirement: a declared source producer that reads native Git must receive the
+original exact commit as a genuine Git root. A directory of copied blobs is not
+a working copy; inventing a commit or weakening the producer's committed-source
+checks does not satisfy this requirement. This source owner, not a package
+publisher, owns transient materialization from its already-acquired objects.
+
+The callable reader additionally provides
+`await reader.materialize({repository, commit})`. Version 1 admits only the whole
+root containing bounded regular/executable files; Gitlinks, symlinks, special
+entries, scoped selection and embedded URL credentials refuse. It reads every
+source blob under the existing limits before invoking the existing detached
+worktree command plan. This is disposable construction custody under the
+caller's existing scratch ownership, not institutional `sourceWorkingCopies`
+admission, a branch allocation, or a new credential grant.
+
+The returned frozen handle contains `kind: 'git.pinned-source-worktree'`,
+`version: 1`, `repository`, `commit`, `directory`, `entries`, `verify()` and
+`dispose()`. Entries retain the original pinned-reader shape
+`{path,mode,bytes,source:{repository,commit,path,object}}`. No credential or
+repository environment is returned. Verification retains independent digests;
+mutating returned evidence cannot authorize altered source. `verify()` checks
+the exact root/HEAD, native metadata and every authored byte/executable mode.
+Additional untracked generated products are allowed, but their qualification
+belongs to Code and the publication owner, not to Git.
+
+Materialization uses an isolated environment without inherited credential,
+configuration, Git-routing, hooks or filesystem-monitor settings. Native Git
+must use the prefetched objects without lazy fetching. The original bytes-only
+reader still does not checkout anything, and its existing behavior is unchanged.
+
+Caller lifecycle: retain the handle through installation, declared production
+and authored-source readback. Call `verify()` before Code's result is accepted.
+A publisher may subsequently rewrite its carrier manifest; `dispose()` checks
+physical/native Git identity rather than immutable authored bytes, so that
+intentional packaging metadata does not prevent cleanup. The caller must first
+establish that every producer/reader process has quiesced. An uncertain runner
+must retain the handle and scratch for reconciliation, not call `dispose()`.
+Disposal is single-flight/idempotent and removes only this handle's exact native
+worktree. Changed root, Git binding, HEAD or routing refuses cleanup and retains
+the affected state. It does not prune another worktree or destroy shared stores.
+The outer source owner may remove its disposable scratch only after all handles
+are disposed and no workers remain.
+
+Native verification covers exact detached identity and dirty-original isolation,
+source-byte drift, mutable evidence, unknown commits, unsupported links/Gitlinks,
+redirected scratch/worktree/source, HEAD drift, byte limits, unsupported scope,
+untracked generated products, intentional carrier rewrites and duplicate cleanup.
+Publication consumers must migrate by selecting this explicit operation only for
+supported native generation, and qualify the original produced artifact before
+claiming delivered publication capability.
+
+Configuration is an independent precondition, not inferred from byte equality:
+store initialization uses an empty Git template. Before materialization, the
+existing store's bounded regular local config is parsed without includes and
+must contain only this owner's inert bare-store/object-format and exact origin
+promisor settings. Includes, filters, worktree config, attributes-file overrides,
+filesystem monitors, other routing settings and alternate/graft metadata refuse.
+A filter could execute a side effect while returning identical bytes, so later
+source hashing cannot substitute for this admission check. Held configuration
+and native routing controls are rechecked before verification or disposal.
+Verification also compares the native index's complete stage-zero path/mode/blob
+inventory to the original commit, because Code's source reader depends on that
+index remaining at HEAD. Untracked products remain allowed; a staged deletion
+or replacement cannot pass merely because the working file still looks right.

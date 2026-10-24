@@ -1,8 +1,9 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { mkdir } from "node:fs/promises";
-import { isAbsolute, join, posix } from "node:path";
-import { readTreeEntries, takeBatchRecord } from "./git-command-codec.mjs";
+import { mkdir, mkdtemp, lstat, realpath, readFile, rm } from "node:fs/promises";
+import { createHash } from "node:crypto";
+import { isAbsolute, join, posix, dirname, resolve } from "node:path";
+import { readTreeEntries, takeBatchRecord, readIndexEntries, gitWorktreePlan } from "./git-command-codec.mjs";
 import { composed, containedGitmodulePath, parseGitmodules } from "./gitmodules.mjs";
 
 const oid = value => typeof value === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value);
@@ -35,14 +36,18 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
   // Metadata commands answer at once; a fetch and the batch reads move content (a blobless store fetches each
   // selected blob as it is read), bounded by maxBytes, so their time is the transfer's, not a metadata answer's.
   const transfer = Math.max(120_000, Math.ceil(maxBytes / (256 * 1024)) * 1000);
-  const run = (args, { gitDir, input, timeout = 30_000 } = {}) => new Promise((resolve, reject) => {
+  const run = (args, { gitDir, input, timeout = 30_000, isolated = false } = {}) => new Promise((resolve, reject) => {
     const child = execFile("git", [
       "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never",
       // a disposable store is never repacked or maintained: each lazy fetch would otherwise start a background gc
       "-c", "gc.auto=0", "-c", "maintenance.auto=false",
       ...(gitDir ? ["--git-dir", gitDir] : []), ...args,
     ], { encoding: "buffer", timeout, maxBuffer: maxBytes + 16 * 1024 * 1024,
-      env: { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0" } },
+      env: isolated ? {
+        ...Object.fromEntries(["PATH", "LANG", "LC_ALL", "TZ", "SystemRoot", "WINDIR"].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+        GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0", GIT_CONFIG_PARAMETERS: "",
+        GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1",
+      } : { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0" } },
     (error, stdout) => error ? reject(error) : resolve(stdout));
     child.stdin.on("error", reject);
     child.stdin.end(input);
@@ -61,7 +66,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         repositoryEnvironments.set(gitDir, { ...supplied });
         await mkdir(scratch, { recursive: true });
         const objectFormat = commit.length === 40 ? "sha1" : "sha256";
-        await run(["init", "--bare", "--quiet", "--object-format=" + objectFormat, gitDir]);
+        await run(["init", "--bare", "--quiet", "--template=", "--object-format=" + objectFormat, gitDir]);
         const storedFormat = (await run(["rev-parse", "--show-object-format=storage"], { gitDir })).toString("utf8").trim();
         if (storedFormat !== objectFormat) throw new Error("pinned source storage format differs from its exact object identity");
         for (const args of pinnedStoreConfiguration(repository)) await run(args, { gitDir });
@@ -72,7 +77,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     }
     return stores.get(key);
   };
-  return async function readPinnedSourceFiles({ repository, commit, scope = "", selectFile, enterDirectory } = {}) {
+  const reader = async function readPinnedSourceFiles({ repository, commit, scope = "", selectFile, enterDirectory } = {}) {
     scope = sourcePath(scope);
     if (typeof selectFile !== "function" || typeof enterDirectory !== "function")
       throw new TypeError("explicit file and directory selections are required");
@@ -140,6 +145,172 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     await visit(repository, commit, "");
     return [...files.values()].sort((a, b) => a.path.localeCompare(b.path));
   };
+  /** Version 1: disposable, complete, regular root source at a genuine held commit.
+   * This is construction custody, not institutional source-working-copy admission.
+   * Call dispose only after all source/build readers and writers have quiesced.
+   */
+  reader.materialize = async ({ repository, commit, ...unsupported } = {}) => {
+    if (Object.keys(unsupported).length) throw new TypeError("pinned worktree accepts repository and exact commit only");
+    // Returned native metadata must not contain an embedded transport credential.
+    if (typeof repository === "string" && /^[a-z][a-z0-9+.-]*:\/\//iu.test(repository)) {
+      const url = new URL(repository);
+      if (url.password || url.username && url.protocol !== "ssh:" || url.search || url.hash)
+        throw new TypeError("pinned worktree repository must not contain credentials or parameters");
+    }
+    // Check the existing parent before creating scratch; a symlinked parent must
+    // not receive even an incidental directory creation outside caller custody.
+    const parent = dirname(scratch);
+    if (resolve(scratch) !== scratch || await realpath(parent) !== parent || !(await lstat(parent)).isDirectory())
+      throw new TypeError("pinned worktree scratch parent must be an existing unredirected directory");
+    await mkdir(scratch, { recursive: true });
+    const scratchStat = await lstat(scratch);
+    if (!scratchStat.isDirectory() || await realpath(scratch) !== scratch)
+      throw new TypeError("pinned worktree scratch must be an unredirected directory");
+    const gitDir = await storeFor(repository, commit);
+    // A cleared process environment is insufficient: checkout also consumes the
+    // retained store's local configuration. Admit only this owner's inert store
+    // controls, without following includes or accepting template-installed filters.
+    const configPath = join(gitDir, "config"), configStat = await lstat(configPath);
+    if (!configStat.isFile() || configStat.size > 131072 || await realpath(configPath) !== configPath)
+      throw new TypeError("pinned worktree requires bounded regular native configuration");
+    const admittedConfig = await readFile(configPath);
+    const configuration = await run(["config", "--file", configPath, "--no-includes", "--null", "--list"], { isolated: true });
+    if (!(await readFile(configPath)).equals(admittedConfig)) throw new TypeError("pinned worktree configuration changed during admission");
+    const seen = new Set();
+    for (const row of configuration.toString("utf8").split("\0").filter(Boolean)) {
+      const at = row.indexOf("\n"), key = row.slice(0, at), value = row.slice(at + 1);
+      const allowed = key === "core.repositoryformatversion" && ["0", "1"].includes(value)
+        || key === "core.filemode" && ["true", "false"].includes(value)
+        || key === "core.bare" && value === "true"
+        || key === "extensions.objectformat" && value === (commit.length === 40 ? "sha1" : "sha256")
+        || key === "remote.origin.url" && value === repository
+        || key === "remote.origin.promisor" && value === "true"
+        || key === "remote.origin.partialclonefilter" && value === "blob:none";
+      if (at < 0 || !allowed || seen.has(key)) throw new TypeError("pinned worktree native configuration is not admitted");
+      seen.add(key);
+    }
+    if (!["core.repositoryformatversion", "core.bare", "remote.origin.url", "remote.origin.promisor", "remote.origin.partialclonefilter"].every(key => seen.has(key)))
+      throw new TypeError("pinned worktree native configuration is incomplete");
+    const absent = async path => {
+      try { await lstat(path); } catch (error) { if (error.code === "ENOENT") return; throw error; }
+      throw new TypeError("pinned worktree has unsupported native routing metadata");
+    };
+    for (const name of ["commondir", "objects/info/alternates", "objects/info/http-alternates", "info/grafts", "config.worktree"])
+      await absent(join(gitDir, name));
+    const all = readTreeEntries(await run(["ls-tree", "-r", "-z", "--full-tree", commit], { gitDir }), maxPaths);
+    if (all.some(entry => entry.type !== "blob" || !["100644", "100755"].includes(entry.mode)))
+      throw new TypeError("pinned worktree version 1 requires a complete regular root without Gitlinks");
+    for (const entry of all) {
+      sourcePath(entry.path);
+      if (entry.path.split("/").some(part => part.toLowerCase() === ".git")) throw new TypeError("pinned worktree source collides with Git metadata");
+    }
+    const entries = await reader({ repository, commit, selectFile: () => true, enterDirectory: () => false });
+    const holder = await mkdtemp(join(scratch, "worktree-")), directory = join(holder, "source");
+    const identity = stat => `${stat.dev}:${stat.ino}`;
+    const holderIdentity = identity(await lstat(holder)), storeIdentity = identity(await lstat(gitDir));
+    const config = admittedConfig;
+    const hash = bytes => createHash("sha256").update(bytes).digest("hex");
+    const expected = entries.map(entry => ({ path: entry.path, mode: entry.mode, sha256: hash(entry.bytes) }));
+    let rootIdentity, pointer, metadata, metadataIdentity, metadataControls, disposed = false, disposing, materializationStarted = false, materializationFinished = false;
+    async function controls() {
+      if (disposed) throw new TypeError("pinned worktree has been disposed");
+      for (const [path, expected] of [[scratch, identity(scratchStat)], [holder, holderIdentity], [gitDir, storeIdentity], ...(rootIdentity ? [[directory, rootIdentity]] : [])]) {
+        const stat = await lstat(path);
+        if (!stat.isDirectory() || await realpath(path) !== path || identity(stat) !== expected)
+          throw new TypeError("pinned worktree physical custody changed");
+      }
+      const configPath = join(gitDir, "config"), stat = await lstat(configPath);
+      if (!stat.isFile() || await realpath(configPath) !== configPath || !(await readFile(configPath)).equals(config))
+        throw new TypeError("pinned worktree source routing changed");
+      for (const name of ["commondir", "objects/info/alternates", "objects/info/http-alternates", "info/grafts", "config.worktree"])
+        await absent(join(gitDir, name));
+      if (metadataControls) {
+        await absent(join(metadata, "config.worktree"));
+        const stat = await lstat(metadata);
+        if (!stat.isDirectory() || await realpath(metadata) !== metadata || identity(stat) !== metadataIdentity)
+          throw new TypeError("pinned worktree native metadata custody changed");
+        for (const [name, bytes] of metadataControls) {
+          const file = join(metadata, name), stat = await lstat(file);
+          if (!stat.isFile() || await realpath(file) !== file || !(await readFile(file)).equals(bytes))
+            throw new TypeError("pinned worktree native identity changed");
+        }
+      }
+      if (pointer) {
+        const file = join(directory, ".git"), stat = await lstat(file);
+        if (!stat.isFile() || await realpath(file) !== file || !(await readFile(file)).equals(pointer))
+          throw new TypeError("pinned worktree metadata binding changed");
+      }
+    }
+    const native = args => run(["-c", "core.fsmonitor=false", ...args], { gitDir, isolated: true });
+    const verify = async () => {
+      await controls();
+      // Explicit --git-dir would otherwise observe the bare store rather than its worktree.
+      const observed = async args => (await run(["-c", "core.fsmonitor=false", "-C", directory, ...args], { gitDir: metadata, isolated: true })).toString("utf8").trim();
+      if (await observed(["rev-parse", "HEAD^{commit}"]) !== commit || await observed(["rev-parse", "--show-toplevel"]) !== directory)
+        throw new TypeError("pinned worktree source identity changed");
+      const indexPath = join(metadata, "index"), indexStat = await lstat(indexPath);
+      if (!indexStat.isFile() || await realpath(indexPath) !== indexPath)
+        throw new TypeError("pinned worktree index is not a regular native file");
+      const index = readIndexEntries(await observed(["ls-files", "--stage", "-z"]));
+      const sourceIndex = all.map(entry => ({ path: entry.path, mode: entry.mode, object: entry.object, stage: 0 }));
+      if (JSON.stringify(index) !== JSON.stringify(sourceIndex)) throw new TypeError("pinned worktree index differs from its exact source commit");
+      for (const entry of expected) {
+        let file = directory;
+        for (const part of entry.path.split("/")) {
+          file = join(file, part);
+          if ((await lstat(file)).isSymbolicLink()) throw new TypeError("pinned worktree source became redirected");
+        }
+        const stat = await lstat(file);
+        if (!stat.isFile() || Boolean(stat.mode & 0o111) !== (entry.mode === "100755") || hash(await readFile(file)) !== entry.sha256)
+          throw new TypeError("pinned worktree authored source changed: " + entry.path);
+      }
+      return { kind: "git.pinned-source-worktree-verification", version: 1, repository, commit, files: expected.length };
+    };
+    const dispose = async () => {
+      if (disposed) return;
+      if (disposing) return disposing;
+      disposing = (async () => {
+      await controls();
+      await native(gitWorktreePlan.remove(directory).arguments);
+      // Native command failure throws; never remove a possibly still-registered copy.
+      await rm(holder, { recursive: true });
+      disposed = true;
+      })();
+      return disposing;
+    };
+    try {
+      await controls();
+      materializationStarted = true;
+      await native(gitWorktreePlan.add(directory, commit).arguments);
+      materializationFinished = true;
+      rootIdentity = identity(await lstat(directory));
+      pointer = await readFile(join(directory, ".git"));
+      if (!pointer.toString("utf8").startsWith("gitdir: ")) throw new TypeError("native Git did not create a linked worktree");
+      metadata = pointer.toString("utf8").trim().slice("gitdir: ".length);
+      metadataIdentity = identity(await lstat(metadata));
+      metadataControls = await Promise.all(["HEAD", "commondir", "gitdir"].map(async name => [name, await readFile(join(metadata, name))]));
+      await verify();
+    } catch (error) {
+      if (materializationStarted && !materializationFinished) {
+        // A failed native checkout may have registered a partial worktree. Never
+        // erase it by filesystem guesswork or claim the child was quiescent.
+        error.retainedWorktree = directory;
+        throw error;
+      }
+      // Construction has no producer child; only our completed Git calls ran.
+      // Preserve uncertain/changed ownership rather than recursively deleting it.
+      try {
+        await controls();
+        if (rootIdentity) await native(gitWorktreePlan.remove(directory).arguments);
+        await rm(holder, { recursive: true });
+      } catch { error.retainedWorktree = directory; }
+      throw error;
+    }
+    return Object.freeze({ kind: "git.pinned-source-worktree", version: 1, repository, commit, directory,
+      entries, verify, dispose });
+  };
+  return reader;
+
 }
 
 // These native argument plans are shared by the disposable async reader and
