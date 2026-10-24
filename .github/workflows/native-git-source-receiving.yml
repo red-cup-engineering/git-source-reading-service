@@ -1,0 +1,96 @@
+name: Git source native and packed-consumer receiving
+
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/native-git-source-receiving.yml"
+      - "package.json"
+      - "src/**"
+      - "test/**"
+  push:
+    branches: [main]
+  merge_group:
+    types: [checks_requested]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: git-source-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  original-source-and-consumer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    steps:
+      - name: Check out exact proposed source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          persist-credentials: false
+      - name: Use original Node 24 contract
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
+        with:
+          node-version: "24"
+      - name: Run all source checks and native real Git tests
+        run: |
+          git --version
+          node --version
+          npm run verify
+      - name: Pack original source and independently exercise actual Git object reader
+        shell: bash
+        run: |
+          set -euo pipefail
+          npm pack --ignore-scripts --json --pack-destination "$RUNNER_TEMP" > "$RUNNER_TEMP/git-source-pack.json"
+          tarball="$(node -e 'const p=require(process.argv[1]);if(p.length!==1||typeof p[0]?.filename!=="string")process.exit(2);process.stdout.write(p[0].filename)' "$RUNNER_TEMP/git-source-pack.json")"
+          tar -tzf "$RUNNER_TEMP/$tarball" > "$RUNNER_TEMP/git-source-members.txt"
+          for required in \
+            "package/src/pinned-source-files.mjs" \
+            "package/src/git-command-codec.mjs" \
+            "package/src/source-working-copy-schema.mjs" \
+            "package/src/gitmodules.mjs"; do
+            grep -Fx "$required" "$RUNNER_TEMP/git-source-members.txt"
+          done
+          mkdir -p "$RUNNER_TEMP/consumer"
+          cd "$RUNNER_TEMP/consumer"
+          npm init -y >/dev/null
+          npm install --offline --ignore-scripts --no-audit --no-fund --no-package-lock "$RUNNER_TEMP/$tarball"
+          node --input-type=module <<'NODE'
+          import assert from "node:assert/strict";
+          import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+          import { tmpdir } from "node:os";
+          import { join } from "node:path";
+          import { execFileSync } from "node:child_process";
+          import { createPinnedSourceReader } from "@red-cup-engineering/git-source-reading-service/pinned-source-files";
+          import { gitSourceWorkingCopyRequestSchema } from "@red-cup-engineering/git-source-reading-service/source-working-copy-schema";
+          const root = mkdtempSync(join(tmpdir(), "git-reader-original-consumer-"));
+          try {
+            assert.ok(gitSourceWorkingCopyRequestSchema.properties.commit);
+            for (const format of ["sha1", "sha256"]) {
+              const repository = join(root, format);
+              mkdirSync(repository);
+              const git = (...args) => execFileSync("git", ["-C", repository, ...args], {encoding:"utf8"}).trim();
+              git("init", "-q", "--object-format=" + format);
+              git("config", "user.name", "Original source receiver");
+              git("config", "user.email", "receiver@example.invalid");
+              writeFileSync(join(repository, "source.txt"), "received exact bytes\n");
+              git("add", "source.txt");
+              git("commit", "-qm", "Receive original source");
+              const commit = git("rev-parse", "HEAD");
+              assert.equal(commit.length, format === "sha1" ? 40 : 64);
+              const read = createPinnedSourceReader({scratch:join(root, "scratch-" + format)});
+              const selector = {repository,commit,selectFile:p=>p==="source.txt",enterDirectory:()=>false};
+              const rows = await read(selector);
+              assert.equal(rows.length,1);
+              assert.equal(rows[0].path,"source.txt");
+              assert.equal(rows[0].bytes.toString("utf8"),"received exact bytes\n");
+              assert.equal(rows[0].source.commit,commit);
+              const absent = format === "sha1" ? "f".repeat(40) : "f".repeat(64);
+              await assert.rejects(read({...selector,commit:absent}));
+            }
+            process.stdout.write("Two installed native Git SHA-1/SHA-256 consumers received and adverse revisions refused\n");
+          } finally {
+            rmSync(root,{recursive:true,force:true});
+          }
+          NODE
