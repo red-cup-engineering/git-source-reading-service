@@ -59,6 +59,19 @@ identity. Exact published primitive and umbrella APIs are then read back through
 the original registry receipt and used by the ordinary Code CLI; source tests
 alone do not establish consumer delivery.
 
+**History extraction's actual host prerequisite:** The original native
+`test/extraction-mappings.test.mjs` executes `git filter-repo` on a disposable
+Git history; a Node/Git runner without that separately installed utility
+cannot qualify this test. The original dependency-free source reader itself
+does not call filter-repo for ordinary pinned-source reads. The public
+repository-owned native receiving workflow pins upstream
+[newren/git-filter-repo v2.47.0](https://github.com/newren/git-filter-repo/tree/6f79afc8c90c592a3052e6cc53c2ca8907515bca)
+by exact Git source and executable blob before running the *entire* source
+suite. No private Git Services CI quota, production history rewrite,
+unverified shell installer, or npm dependency on unrelated Git tools is
+introduced. Full-suite passing remains separate from publishing a new
+registry package or accepting a real user Work request.
+
 The original command codec's `gitExtractionPlan.rewriteMappings` accepts bounded,
 explicit file and directory histories and their receiving paths. Unlike a
 whole-directory extraction, one evidence file can be retained without carrying
