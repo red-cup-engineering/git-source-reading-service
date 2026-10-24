@@ -1,6 +1,6 @@
 {
   "name": "@red-cup-engineering/git-source-reading-service",
-  "version": "0.1.3-dev.0",
+  "version": "0.1.3",
   "private": false,
   "type": "module",
   "description": "Read authored files from explicitly scoped, composed Git repositories using native Git object and configuration readers.",
