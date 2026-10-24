@@ -58,3 +58,12 @@ an export-by-export strict identity test qualify forwarding, including schema
 identity. Exact published primitive and umbrella APIs are then read back through
 the original registry receipt and used by the ordinary Code CLI; source tests
 alone do not establish consumer delivery.
+
+The original command codec's `gitExtractionPlan.rewriteMappings` accepts bounded,
+explicit file and directory histories and their receiving paths. Unlike a
+whole-directory extraction, one evidence file can be retained without carrying
+its unrelated siblings into the scientific repository. Run the generated
+`git filter-repo` command only in the existing shared scratch-clone procedure;
+source repositories remain intact. The native extraction regression checks
+history retention, exact bytes and excluded neighboring source. PTGAE and
+manoomin Science are the original receiving consumers for this extension.

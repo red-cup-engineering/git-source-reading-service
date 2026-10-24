@@ -432,6 +432,23 @@ export const gitExtractionPlan = Object.freeze({
       ...directories.flatMap((directory) => ["--path-rename", `${directory}/:`])]);
   },
   tree: (commit, directory) => gitCommand(["rev-parse", "--verify", "--quiet", directory ? `${revision(commit)}:${literal(directory)}` : `${revision(commit)}^{tree}`], { ok: [0, 1, 128] }),
+  /** Retain selected files without admitting their former parent directories. */
+  rewriteMappings: (mappings) => {
+    if (!Array.isArray(mappings) || mappings.length === 0 || mappings.length > 64) throw new TypeError("extraction requires 1 to 64 explicit path mappings");
+    const sources = new Set();
+    const paths = mappings.map(({ from, to = "", kind = "directory" } = {}) => {
+      literal(from);
+      if (to !== "") literal(to);
+      if (!["file", "directory"].includes(kind) || (kind === "file" && !to)) throw new TypeError("file extraction requires a receiving file path");
+      if (sources.has(from)) throw new TypeError("duplicate extraction source path");
+      sources.add(from);
+      const suffix = kind === "directory" ? "/" : "";
+      return { from: from + suffix, to: to + (to && kind === "directory" ? "/" : "") };
+    });
+    return gitCommand(["filter-repo", "--force", "--quiet",
+      ...paths.flatMap(({ from }) => ["--path", from]),
+      ...paths.flatMap(({ from, to }) => ["--path-rename", `${from}:${to}`])]);
+  },
   head: () => gitCommand(["rev-parse", "--verify", "HEAD"]),
   checkout: (branch) => gitCommand(["checkout", "--quiet", revision(branch)]),
   /** The commits since `base` that touched `directory`, as patches relative to it. */
