@@ -33,8 +33,25 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444
         with:
           node-version: "24"
+      - name: Select original git-filter-repo, which the history test really executes
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          repository: newren/git-filter-repo
+          ref: 6f79afc8c90c592a3052e6cc53c2ca8907515bca
+          path: upstream-git-filter-repo
+          persist-credentials: false
+      - name: Qualify exact upstream Git history-extraction test supplier
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git -C upstream-git-filter-repo rev-parse HEAD)" = "6f79afc8c90c592a3052e6cc53c2ca8907515bca"
+          test "$(git hash-object upstream-git-filter-repo/git-filter-repo)" = "a40bce548d2c0bd0b8d5e233e8930d462e35e495"
+          chmod +x upstream-git-filter-repo/git-filter-repo
+          echo "$GITHUB_WORKSPACE/upstream-git-filter-repo" >> "$GITHUB_PATH"
+          python3 --version
       - name: Run all source checks and native real Git tests
         run: |
+          git filter-repo --version
           git --version
           node --version
           npm run verify
