@@ -4,7 +4,7 @@ import { execFileSync } from "node:child_process";
 import { mkdtemp, mkdir, writeFile, chmod, rm, symlink, lstat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createPinnedSourceReader } from "../src/pinned-source-files.mjs";
+import { createPinnedSourceReader, receivePinnedRepositoryCommitSync, readGitBlobObjectsSync } from "../src/pinned-source-files.mjs";
 
 const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" }).trim();
 async function fixture(t, objectFormat = "sha1") {
@@ -214,4 +214,31 @@ test("a SHA256 source cannot be received through a truncated SHA1-shaped identit
   const read = createPinnedSourceReader({ scratch });
   await assert.rejects(read({ ...f.selection, commit: f.parent.commit.slice(0, 40) }));
   assert.equal(git(f.root, "--git-dir", join(scratch, "0.git"), "rev-parse", "--show-object-format=storage"), "sha1");
+});
+
+for (const objectFormat of ["sha1","sha256"]) {
+ test("existing "+objectFormat+" object stores receive only selected missing binary blobs", async t => {
+  const f=await fixture(t,objectFormat),cache=join(f.root,"original-cache.git");
+  git(f.child.dir,"config","uploadpack.allowFilter","true");
+  git(f.child.dir,"config","uploadpack.allowAnySHA1InWant","true");
+  const source="file://"+f.child.dir, object=git(f.child.dir,"rev-parse",f.child.commit+":src/image.bin");
+  const unrelated=git(f.child.dir,"rev-parse",f.child.commit+":data/unselected");
+  const received=receivePinnedRepositoryCommitSync({directory:cache,repository:source,commit:f.child.commit,create:true});
+  assert.equal(received.fetched,true);
+  const present=oid=>{try{execFileSync("git",["-C",cache,"cat-file","-e",oid],{env:{...process.env,GIT_NO_LAZY_FETCH:"1"},stdio:"pipe"});return true}catch{return false}};
+  assert.equal(present(object),false);assert.equal(present(unrelated),false);
+  await assert.rejects(async()=>readGitBlobObjectsSync({directory:cache,objects:[object]}));
+  assert.equal(present(object),false,"local-only qualification cannot acquire an object");
+  const files=readGitBlobObjectsSync({directory:cache,objects:[object],receiveMissing:true});
+  assert.deepEqual([...files.get(object)],[0,255,128]);assert.equal(present(unrelated),false,"unselected code is not fetched");
+  assert.equal(receivePinnedRepositoryCommitSync({directory:cache,repository:source,commit:f.child.commit}).fetched,false);
+  await assert.rejects(async()=>readGitBlobObjectsSync({directory:cache,objects:[object],maxBytes:2}),/byte bound/);
+  await assert.rejects(async()=>receivePinnedRepositoryCommitSync({directory:cache,repository:source+"-foreign",commit:f.child.commit}),/identity/);
+ });
+}
+test("selected blob adapters reject unbounded populations and non-blob roles without source writes",async t=>{
+ const f=await fixture(t);
+ assert.throws(()=>readGitBlobObjectsSync({directory:f.child.dir,objects:["--help"]}),/exact selected/);
+ assert.throws(()=>readGitBlobObjectsSync({directory:f.child.dir,objects:[f.child.commit]}),/not a native blob/);
+ assert.throws(()=>receivePinnedRepositoryCommitSync({directory:f.child.dir,repository:f.child.dir,commit:f.child.commit}),/bare repository/);
 });

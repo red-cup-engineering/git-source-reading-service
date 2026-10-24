@@ -80,3 +80,6 @@ its unrelated siblings into the scientific repository. Run the generated
 source repositories remain intact. The native extraction regression checks
 history retention, exact bytes and excluded neighboring source. PTGAE and
 manoomin Science are the original receiving consumers for this extension.
+
+
+The pinned-source-files entrance also exports receivePinnedRepositoryCommitSync and readGitBlobObjectsSync for an owner that already holds a repository or its original bare cache. They share the asynchronous reader native fetch plans and binary codec. Commit receiving is blobless; blob reading is local-only by default, with explicit missing-selected-object receiving through the original origin. Both adapters keep finite time, path and byte limits and create no checkout, worktree, branch or copied code tree.
