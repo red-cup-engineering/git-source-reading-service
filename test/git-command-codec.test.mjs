@@ -87,6 +87,78 @@ test("a commit request names literal file paths inside the repository, never its
   assert.throws(() => readGitCommitPathsRequest({ paths: ["a.txt"], message: "Edit", dryRun: "yes" }), /dryRun must be boolean/u);
 });
 
+test("reviewed source retains every selected Git identity and explicit absence without mutable intake aliases", () => {
+  const entries = [
+    { path: "tree", mode: "040000", type: "tree", sha: "a".repeat(40) },
+    { path: "file", mode: "100644", type: "blob", sha: "b".repeat(40) },
+    { path: "executable", mode: "100755", type: "blob", sha: "c".repeat(40) },
+    { path: "link", mode: "120000", type: "blob", sha: "d".repeat(40) },
+    { path: "child", mode: "160000", type: "commit", sha: "e".repeat(40) },
+    { path: "枝/new [file].mjs", absent: true },
+  ];
+  const reviewedSource = { revision: "f".repeat(40), entries };
+  const result = readGitCommitPathsRequest({ paths: entries.map(({ path }) => path), message: "Receive selected source", reviewedSource });
+  assert.deepEqual(result.reviewedSource, reviewedSource);
+  assert.deepEqual(result.paths, entries.map(({ path }) => path).sort());
+  assert.ok(Object.isFrozen(result.reviewedSource));
+  assert.ok(Object.isFrozen(result.reviewedSource.entries));
+  assert.ok(result.reviewedSource.entries.every(Object.isFrozen));
+  entries[0].sha = "1".repeat(40);
+  entries.push({ path: "foreign", absent: true });
+  reviewedSource.revision = "2".repeat(40);
+  assert.equal(result.reviewedSource.revision, "f".repeat(40));
+  assert.equal(result.reviewedSource.entries.length, 6);
+  assert.equal(result.reviewedSource.entries[0].sha, "a".repeat(40));
+});
+
+test("reviewed source refuses missing, duplicate and foreign path evidence instead of weakening the selected scope", () => {
+  const revision = "a".repeat(40), a = { path: "a", absent: true }, b = { path: "b", absent: true };
+  for (const reviewedSource of [null, {}, { revision }, { revision, entries: [] },
+    { revision, entries: [a] }, { revision, entries: [a, a] },
+    { revision, entries: [a, { path: "foreign", absent: true }] },
+    { revision, entries: [a, b, b] }, { revision, entries: [a, null] },
+    { revision, entries: new Array(2) }, { revision, entries: [a, b], extra: true }]) {
+    assert.throws(() => readGitCommitPathsRequest({ paths: ["a", "b"], message: "Receive", reviewedSource }), TypeError);
+  }
+  assert.throws(() => readGitCommitPathsRequest({ paths: ["a", "a"], message: "Receive", reviewedSource: { revision, entries: [a] } }), /one exact entry/u);
+  // Existing callers still deduplicate paths and omit the optional carrier.
+  assert.deepEqual(readGitCommitPathsRequest({ paths: ["a", "a"], message: " Receive " }), {
+    paths: ["a"], message: "Receive", push: false, dryRun: false,
+  });
+});
+
+test("reviewed source requires non-null immutable SHA-1 identities and matching Git mode/type pairs", () => {
+  const admit = (entry, revision = "a".repeat(40)) => readGitCommitPathsRequest({
+    paths: ["a"], message: "Receive", reviewedSource: { revision, entries: [entry] },
+  });
+  const file = { path: "a", mode: "100644", type: "blob", sha: "b".repeat(40) };
+  for (const revision of ["HEAD", "a".repeat(39), "a".repeat(64), "A".repeat(40), "0".repeat(40), null, 1]) {
+    assert.throws(() => admit(file, revision), /immutable revision/u);
+  }
+  for (const entry of [
+    { ...file, sha: null }, { ...file, sha: "0".repeat(40) }, { ...file, sha: "b".repeat(64) },
+    { ...file, sha: "HEAD:a" }, { ...file, mode: 100644 }, { ...file, mode: "100600" },
+    { ...file, mode: "100644", type: "commit" }, { ...file, mode: "160000", type: "blob" },
+    { ...file, mode: "040000", type: "blob" }, { ...file, extra: true },
+    { path: "a", mode: "100644", type: "blob" },
+  ]) assert.throws(() => admit(entry), /matching Git mode\/type/u);
+  for (const entry of [{ path: "a", absent: false }, { path: "a", absent: null },
+    { path: "a", absent: true, sha: null }, { ...file, absent: true }, { path: "a" }]) {
+    assert.throws(() => admit(entry), TypeError);
+  }
+});
+
+test("reviewed source paths are canonical literal Git paths with no hidden traversal or metadata", () => {
+  for (const path of ["/absolute", "./a", "../a", "a/../b", "a/./b", "a//b", "a/", ".git", "nested/.GIT/config",
+    "a\\b", "C:/outside", "a\rfile", "a\nfile", "a\tfile", "a\u0000file", "a\u001bfile", "a\u007ffile"]) {
+    assert.throws(() => readGitCommitPathsRequest({ paths: [path], message: "Receive",
+      reviewedSource: { revision: "a".repeat(40), entries: [{ path, absent: true }] } }), TypeError, path);
+  }
+  const path = ":(glob)* [literal].mjs";
+  assert.equal(readGitCommitPathsRequest({ paths: [path], message: "Receive",
+    reviewedSource: { revision: "a".repeat(40), entries: [{ path, absent: true }] } }).reviewedSource.entries[0].path, path);
+});
+
 test("a message claiming a decommission is admitted only when a committed path names the target", () => {
   assert.throws(() => readGitCommitPathsRequest({ paths: ["a.txt"], message: "land FAE-decommission fixes" }), /decommissioning 'FAE'/u);
   assert.throws(() => readGitCommitPathsRequest({ paths: ["a.txt"], message: "Decommission the koios-news reader" }), /decommissioning 'koios-news'/u);
