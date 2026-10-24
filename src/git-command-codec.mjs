@@ -32,6 +32,45 @@ function unbackedDecommissionClaims(message, paths) {
   return [...targets].filter((target) => !named.includes(target.toLowerCase()));
 }
 
+const REVIEWED_OID = /^(?!0{40}$)[0-9a-f]{40}$/u;
+const REVIEWED_TYPES = Object.freeze({ "040000": "tree", "100644": "blob", "100755": "blob", "120000": "blob", "160000": "commit" });
+const reviewedPath = (value) => typeof value === "string" && value.length > 0
+  && !value.startsWith("/") && !/^[A-Za-z]:/u.test(value) && !/[\\\u0000-\u001f\u007f]/u.test(value)
+  && value.split("/").every((part) => part !== "" && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+const exactFields = (value, keys) => record(value) !== undefined && Object.keys(value).length === keys.length
+  && keys.every((key) => Object.hasOwn(value, key));
+
+/** Reviewed identities are data, not permission or an observation of the current source. */
+function readReviewedSource(value, paths, originalPaths) {
+  if (!exactFields(value, ["revision", "entries"]) || typeof value.revision !== "string" || !REVIEWED_OID.test(value.revision)
+    || !Array.isArray(value.entries) || value.entries.length !== paths.length
+    || originalPaths.length !== paths.length || !paths.every(reviewedPath)) {
+    throw new TypeError("git-commit-paths reviewedSource requires an immutable revision and one exact entry per selected safe path");
+  }
+  const selected = new Set(paths), seen = new Set();
+  const entries = [];
+  for (const entry of value.entries) {
+    if (!record(entry) || !reviewedPath(entry.path) || !selected.has(entry.path) || seen.has(entry.path)) {
+      throw new TypeError("git-commit-paths reviewedSource entries must name each selected path exactly once");
+    }
+    seen.add(entry.path);
+    if (Object.hasOwn(entry, "absent")) {
+      if (!exactFields(entry, ["path", "absent"]) || entry.absent !== true) {
+        throw new TypeError("git-commit-paths reviewedSource absence must be explicit absent:true without an object identity");
+      }
+      entries.push(Object.freeze({ path: entry.path, absent: true }));
+    } else {
+      if (!exactFields(entry, ["path", "mode", "type", "sha"]) || typeof entry.mode !== "string"
+        || !Object.hasOwn(REVIEWED_TYPES, entry.mode) || REVIEWED_TYPES[entry.mode] !== entry.type
+        || typeof entry.sha !== "string" || !REVIEWED_OID.test(entry.sha)) {
+        throw new TypeError("git-commit-paths reviewedSource entry requires a matching Git mode/type and non-null immutable object id");
+      }
+      entries.push(Object.freeze({ path: entry.path, mode: entry.mode, type: entry.type, sha: entry.sha }));
+    }
+  }
+  return Object.freeze({ revision: value.revision, entries: Object.freeze(entries) });
+}
+
 /** Admit and normalize the public git-commit-paths request. */
 export function readGitCommitPathsRequest(input) {
   const value = record(input);
@@ -42,7 +81,9 @@ export function readGitCommitPathsRequest(input) {
   const unbacked = unbackedDecommissionClaims(message, paths);
   if (unbacked.length > 0) throw new TypeError(`git-commit-paths message claims decommissioning ${unbacked.map((target) => `'${target}'`).join(", ")} but no committed path names it`);
   for (const flag of ["push", "dryRun"]) if (value[flag] !== undefined && typeof value[flag] !== "boolean") throw new TypeError(`git-commit-paths ${flag} must be boolean when supplied`);
-  return Object.freeze({ paths: Object.freeze(paths), message, push: value.push === true, dryRun: value.dryRun === true });
+  const reviewedSource = value.reviewedSource === undefined ? undefined : readReviewedSource(value.reviewedSource, paths, value.paths);
+  return Object.freeze({ paths: Object.freeze(paths), message, push: value.push === true, dryRun: value.dryRun === true,
+    ...(reviewedSource === undefined ? {} : { reviewedSource }) });
 }
 
 /** Branches managed by the worktree owner, whose retirement may delete a remote ref.

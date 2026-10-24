@@ -83,6 +83,28 @@ manoomin Science are the original receiving consumers for this extension.
 
 
 The pinned-source-files entrance also exports receivePinnedRepositoryCommitSync and readGitBlobObjectsSync for an owner that already holds a repository or its original bare cache. They share the asynchronous reader native fetch plans and binary codec. Commit receiving is blobless; blob reading is local-only by default, with explicit missing-selected-object receiving through the original origin. Both adapters keep finite time, path and byte limits and create no checkout, worktree, branch or copied code tree.
+## Reviewed source for exact-path publication
+
+The pure `readGitCommitPathsRequest` decoder accepts an optional
+`reviewedSource: {revision, entries}`. `revision` is the original reviewed
+non-null lowercase SHA-1 commit identity, never a branch name or latest alias.
+Every selected path occurs exactly once, with either its reviewed
+`{path, mode, type, sha}` or `{path, absent: true}`. Missing, repeated, foreign,
+unsafe or ambiguous entries refuse. A present object needs a non-null SHA-1
+identity and one standard matching Git mode/type pair: regular/executable or
+symbolic-link blob, tree, or Gitlink commit. Absence carries no object fields.
+
+Reviewed paths are canonical repository-relative literal paths: no empty/dot
+segments, metadata directory, absolute/drive path, backslash or control bytes.
+The returned reviewed carrier is copied and frozen, preserving the exact
+identities and explicit absence after caller input changes. Existing requests
+without this optional field retain their previous normalization and behavior.
+
+This decoder performs no Git observation or effect. The source publisher must
+compare these identities with the actual original reviewed revision and current
+target, preserve unrelated paths and refuse changed preimages. Parsing alone
+does not authorize deletion, source publication or any particular carrier kind.
+
 ## Disposable native source construction (version 1)
 
 Requirement: a declared source producer that reads native Git must receive the
