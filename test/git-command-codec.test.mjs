@@ -150,13 +150,26 @@ test("reviewed source requires non-null immutable SHA-1 identities and matching 
 
 test("reviewed source paths are canonical literal Git paths with no hidden traversal or metadata", () => {
   for (const path of ["/absolute", "./a", "../a", "a/../b", "a/./b", "a//b", "a/", ".git", "nested/.GIT/config",
-    "a\\b", "C:/outside", "a\rfile", "a\nfile", "a\tfile", "a\u0000file", "a\u001bfile", "a\u007ffile"]) {
+    "\\absolute", "a\\..\\b", "a\\.\\b", "a\\.GIT\\config", "a\\\\b", "a\\", "a/C:outside", "C:/outside", "a\rfile", "a\nfile", "a\tfile", "a\u0000file", "a\u001bfile", "a\u007ffile"]) {
     assert.throws(() => readGitCommitPathsRequest({ paths: [path], message: "Receive",
       reviewedSource: { revision: "a".repeat(40), entries: [{ path, absent: true }] } }), TypeError, path);
   }
   const path = ":(glob)* [literal].mjs";
   assert.equal(readGitCommitPathsRequest({ paths: [path], message: "Receive",
     reviewedSource: { revision: "a".repeat(40), entries: [{ path, absent: true }] } }).reviewedSource.entries[0].path, path);
+});
+
+test("reviewed source preserves literal quote and backslash filename bytes", () => {
+  const path = String.raw`notes/"First Steps \360\237\220\276 I'm Here.md"`;
+  const reviewedSource = {revision: "a".repeat(40), entries: [
+    {path, mode: "100644", type: "blob", sha: "b".repeat(40)},
+    {path: String.raw`notes/a\b`, absent: true}
+  ]};
+  const result = readGitCommitPathsRequest({paths: reviewedSource.entries.map(row => row.path),
+    message: "Receive exact names", push: true, reviewedSource});
+  assert.deepEqual(result.reviewedSource, reviewedSource);
+  assert.deepEqual(result.paths, reviewedSource.entries.map(row => row.path).sort());
+  assert.notEqual(result.paths[0], result.paths[0].replaceAll("\\", "/"));
 });
 
 test("a message claiming a decommission is admitted only when a committed path names the target", () => {

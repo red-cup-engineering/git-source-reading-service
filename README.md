@@ -94,8 +94,12 @@ unsafe or ambiguous entries refuse. A present object needs a non-null SHA-1
 identity and one standard matching Git mode/type pair: regular/executable or
 symbolic-link blob, tree, or Gitlink commit. Absence carries no object fields.
 
-Reviewed paths are canonical repository-relative literal paths: no empty/dot
-segments, metadata directory, absolute/drive path, backslash or control bytes.
+Reviewed paths are exact repository-relative literal Git paths. Literal quotes
+and backslashes in POSIX filenames are preserved, never unquoted, normalized or
+converted into separators. Safety checks inspect both slash spellings and refuse
+empty/dot/traversal segments, case-insensitive metadata directories, absolute or
+drive paths and control bytes. Accepting a path does not assert Windows checkout
+portability; a native consumer must still preserve the exact Git identity.
 The returned reviewed carrier is copied and frozen, preserving the exact
 identities and explicit absence after caller input changes. Existing requests
 without this optional field retain their previous normalization and behavior.
