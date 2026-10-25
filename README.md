@@ -175,3 +175,22 @@ Verification also compares the native index's complete stage-zero path/mode/blob
 inventory to the original commit, because Code's source reader depends on that
 index remaining at HEAD. Untracked products remain allowed; a staged deletion
 or replacement cannot pass merely because the working file still looks right.
+
+
+### Source-only regular-file publication request
+
+`readGitSourceTreePublicationRequest` reuses the exact-path/reviewedSource
+decoder and additionally admits an explicit original GitHub name, stable node
+identity, visibility and authenticated-account expectation, plus one exact
+regular100644 output per selected path. Output bytes use canonical base64 and
+explicit SHA-1 Gitblob and SHA-256 identities. Selected originals must be
+regular100644 blobs or explicit absence. File and aggregate byte/population
+limits apply before decoding. The publisher independently proves those byte
+identities, original ownership, authority, audience and complete tree effects.
+This decoder performs no Git or GitHub effects and grants no permission.
+
+Source-only requests currently require a single-line commit message; native
+publication retains its previous message behavior. The ordinary commit-paths
+CLI awaits the same public source-only operation and does not discover a checkout
+for an explicit sourceRepository request. A planned fresh cut qualifies current
+selected preimages before it can report success.
