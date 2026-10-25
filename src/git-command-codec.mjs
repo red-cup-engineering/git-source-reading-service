@@ -89,6 +89,44 @@ export function readGitCommitPathsRequest(input) {
     ...(reviewedSource === undefined ? {} : { reviewedSource }) });
 }
 
+/** Admit exact remote regular-file bytes; publication remains the system owner's effect. */
+export function readGitSourceTreePublicationRequest(input) {
+  const value = record(input);
+  const request = readGitCommitPathsRequest(input);
+  const owner = value?.sourceRepository;
+  if (/[\r\n]/u.test(request.message)) throw new TypeError("source-only publication requires a single-line commit message");
+  if (!request.push || !request.reviewedSource || !exactFields(owner, ["nameWithOwner", "id", "visibility", "account"])
+      || typeof owner.nameWithOwner !== "string" || !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(owner.nameWithOwner)
+      || owner.nameWithOwner.split("/").some(part => part === "." || part === "..")
+      || typeof owner.id !== "string" || !/^[A-Za-z0-9_=+-]{1,128}$/u.test(owner.id)
+      || !["PUBLIC", "PRIVATE", "INTERNAL"].includes(owner.visibility)
+      || typeof owner.account !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(owner.account))
+    throw new TypeError("source-only publication requires its exact original repository, audience and account");
+  if (!Array.isArray(value.outputs) || value.outputs.length !== request.paths.length || request.paths.length > 128)
+    throw new TypeError("source-only outputs must name every selected path exactly once within the bound");
+  const selected = new Set(request.paths), seen = new Set();
+  let encodedBytes = 0, decodedBytes = 0;
+  const outputs = value.outputs.map(output => {
+    if (!exactFields(output, ["path", "mode", "bytesBase64", "sha", "sha256"])
+        || !selected.has(output.path) || seen.has(output.path) || output.mode !== "100644"
+        || typeof output.bytesBase64 !== "string" || output.bytesBase64.length > 2796204
+        || !REVIEWED_OID.test(output.sha ?? "") || !/^[a-f0-9]{64}$/u.test(output.sha256 ?? ""))
+      throw new TypeError("source-only publication supports one bounded regular100644 byte output per path");
+    seen.add(output.path);
+    encodedBytes += output.bytesBase64.length;
+    if (encodedBytes > 11184816) throw new TypeError("source-only output bytes exceed the aggregate bound");
+    const bytes = Buffer.from(output.bytesBase64, "base64");
+    decodedBytes += bytes.length;
+    if (bytes.toString("base64") !== output.bytesBase64 || bytes.length > 2097152 || decodedBytes > 8388608)
+      throw new TypeError("source-only output requires canonical bounded base64");
+    return Object.freeze({...output});
+  }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);
+  for (const entry of request.reviewedSource.entries)
+    if (entry.absent !== true && (entry.mode !== "100644" || entry.type !== "blob"))
+      throw new TypeError("source-only originals must be regular100644 blobs or explicit absence");
+  return Object.freeze({...request, sourceRepository: Object.freeze({nameWithOwner:owner.nameWithOwner,id:owner.id,visibility:owner.visibility,account:owner.account}), outputs: Object.freeze(outputs)});
+}
+
 /** Branches managed by the worktree owner, whose retirement may delete a remote ref.
  * Integration accepts contributions independently of this lifecycle naming convention. */
 export const WORK_BRANCH = /^(?:codex|duty|transaction)\/[A-Za-z0-9_.-]+$/u;
