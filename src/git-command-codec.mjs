@@ -35,8 +35,11 @@ function unbackedDecommissionClaims(message, paths) {
 const REVIEWED_OID = /^(?!0{40}$)[0-9a-f]{40}$/u;
 const REVIEWED_TYPES = Object.freeze({ "040000": "tree", "100644": "blob", "100755": "blob", "120000": "blob", "160000": "commit" });
 const reviewedPath = (value) => typeof value === "string" && value.length > 0
-  && !value.startsWith("/") && !/^[A-Za-z]:/u.test(value) && !/[\\\u0000-\u001f\u007f]/u.test(value)
-  && value.split("/").every((part) => part !== "" && part !== "." && part !== ".." && part.toLowerCase() !== ".git");
+  && !value.startsWith("/") && !value.startsWith("\\") && !/^[A-Za-z]:/u.test(value) && !/[\u0000-\u001f\u007f]/u.test(value)
+  // Backslash remains a literal Git filename byte. Inspect both separator
+  // spellings for hazards without rewriting the admitted POSIX path.
+  && value.split(/[\\/]/u).every((part) => part !== "" && part !== "." && part !== ".."
+    && part.toLowerCase() !== ".git" && !/^[A-Za-z]:/u.test(part));
 const exactFields = (value, keys) => record(value) !== undefined && Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key));
 
