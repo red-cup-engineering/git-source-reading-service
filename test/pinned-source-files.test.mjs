@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, chmod, rm, symlink, lstat, rename, readdir } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, readFile, chmod, rm, symlink, lstat, rename, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPinnedSourceReader, receivePinnedRepositoryCommitSync, readGitBlobObjectsSync } from "../src/pinned-source-files.mjs";
@@ -77,6 +77,89 @@ test("a warm exact source read works with its remote unavailable and creates no 
   await rename(f.parent.dir, f.parent.dir + ".offline");
   assert.deepEqual(await read(request), first);
   assert.deepEqual(await readdir(scratch), before);
+});
+
+test("reader reconstruction and a fresh process reuse the same held source offline", async t => {
+  const f = await fixture(t), scratch = join(f.root, "retained-source"), selection = {
+    repository: f.parent.dir, commit: f.parent.commit,
+    selectFile: path => path === "package.json", enterDirectory: () => false,
+  };
+  const first = await createPinnedSourceReader({ scratch })(selection);
+  const before = await readdir(scratch);
+  await rename(f.parent.dir, f.parent.dir + ".offline");
+  assert.deepEqual(await createPinnedSourceReader({ scratch })(selection), first);
+  const program = `import {createPinnedSourceReader} from ${JSON.stringify(new URL("../src/pinned-source-files.mjs", import.meta.url).href)};
+    const read=createPinnedSourceReader({scratch:${JSON.stringify(scratch)}});
+    const files=await read({repository:${JSON.stringify(selection.repository)},commit:${JSON.stringify(selection.commit)},selectFile:p=>p==='package.json',enterDirectory:()=>false});
+    console.log(JSON.stringify(files.map(f=>({path:f.path,bytes:f.bytes.toString('base64'),source:f.source}))));`;
+  const received = JSON.parse(execFileSync(process.execPath, ["--input-type=module", "--eval", program], { encoding: "utf8", timeout: 15000 }));
+  assert.deepEqual(received, first.map(file => ({ path: file.path, bytes: file.bytes.toString("base64"), source: file.source })));
+  assert.deepEqual(await readdir(scratch), before);
+});
+
+test("a reused directory keeps different repositories separate instead of repointing ordinal stores", async t => {
+  const f = await fixture(t), scratch = join(f.root, "distinct-repositories");
+  const selection = { selectFile: path => path === "package.json" || path === "src/image.bin", enterDirectory: () => false };
+  const first = await createPinnedSourceReader({ scratch })({ ...selection, repository: f.parent.dir, commit: f.parent.commit });
+  const second = await createPinnedSourceReader({ scratch })({ ...selection, repository: f.child.dir, commit: f.child.commit });
+  assert.deepEqual([...second[0].bytes], [0, 255, 128]);
+  await rename(f.parent.dir, f.parent.dir + ".offline");
+  await rename(f.child.dir, f.child.dir + ".offline");
+  assert.deepEqual(await createPinnedSourceReader({ scratch })({ ...selection, repository: f.parent.dir, commit: f.parent.commit }), first);
+  assert.deepEqual(await createPinnedSourceReader({ scratch })({ ...selection, repository: f.child.dir, commit: f.child.commit }), second);
+  assert.equal((await readdir(scratch)).length, 2);
+});
+
+test("independent warm readers serialize presence and fetch, transferring each missing input once", async t => {
+  const f = await fixture(t), scratch = join(f.root, "shared-transfers");
+  git(f.child.dir, "config", "uploadpack.allowFilter", "true");
+  git(f.child.dir, "config", "uploadpack.allowAnySHA1InWant", "true");
+  const repository = "file://" + f.child.dir;
+  const request = { repository, commit: f.child.commit, selectFile: path => path === "src/index.mjs", enterDirectory: () => false };
+  await createPinnedSourceReader({ scratch })(request);
+  const next = { ...request, commit: git(f.child.dir, "rev-parse", "HEAD") };
+  const trace = join(f.root, "shared.trace"), options = { scratch, environment: { GIT_TRACE: trace } };
+  const results = await Promise.all([createPinnedSourceReader(options)(next), createPinnedSourceReader(options)(next)]);
+  assert.deepEqual(results[0], results[1]);
+  assert.equal(results[0][0].bytes.toString(), "export const received = 'newer';\n");
+  const fetches = (await readFile(trace, "utf8")).split("\n").filter(line => /built-in: git .*\bfetch\b/u.test(line));
+  assert.equal(fetches.length, 2, "one commit acquisition and one selected-blob acquisition across both readers");
+  assert.equal((await readdir(scratch)).length, 1);
+  const store = join(scratch, (await readdir(scratch))[0]);
+  assert.equal(git(f.root, "--git-dir", store, "for-each-ref"), "", "the transfer lease creates no persistent ref");
+  await assert.rejects(lstat(join(store, "refs/source-reader-transfer.lock")), { code: "ENOENT" });
+});
+
+test("independent cold factories initialize one original store and receive the same exact bytes", async t => {
+  const f = await fixture(t), scratch = join(f.root, "cold-factories");
+  const request = { repository: f.parent.dir, commit: f.parent.commit, selectFile: path => path === "package.json", enterDirectory: () => false };
+  const rows = await Promise.all([createPinnedSourceReader({ scratch })(request), createPinnedSourceReader({ scratch })(request)]);
+  assert.deepEqual(rows[0], rows[1]);
+  assert.equal(rows[0][0].bytes.toString(), "{}\n");
+  assert.equal((await readdir(scratch)).length, 1);
+});
+
+test("reconstructed source refuses changed routing or physical custody before using held data", async t => {
+  const f = await fixture(t), scratch = join(f.root, "received-custody");
+  const selection = { repository: f.parent.dir, commit: f.parent.commit, selectFile: path => path === "package.json", enterDirectory: () => false };
+  await createPinnedSourceReader({ scratch })(selection);
+  const name = (await readdir(scratch))[0], store = join(scratch, name);
+  git(f.root, "--git-dir", store, "config", "remote.origin.url", f.child.dir);
+  await assert.rejects(createPinnedSourceReader({ scratch })(selection), /configuration differs/u);
+  git(f.root, "--git-dir", store, "config", "remote.origin.url", f.parent.dir);
+  await rename(store, store + ".held");
+  await symlink(store + ".held", store, "dir");
+  await assert.rejects(createPinnedSourceReader({ scratch })(selection), /unredirected owned directory/u);
+  assert.equal((await readdir(scratch)).length, 2, "no replacement source is allocated for changed custody");
+});
+
+test("transport credentials and query secrets cannot become retained source configuration", async t => {
+  const root = await mkdtemp(join(tmpdir(), "source-credential-admission-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const scratch = join(root, "uncreated"), read = createPinnedSourceReader({ scratch });
+  for (const repository of ["https://user:secret@example.invalid/source.git", "https://example.invalid/source.git?token=secret", "https://example.invalid/source.git#secret"])
+    await assert.rejects(read({ repository, commit: "a".repeat(40), selectFile: () => true, enterDirectory: () => false }), /must not contain credentials or parameters/u);
+  await assert.rejects(lstat(scratch), { code: "ENOENT" });
 });
 
 for (const format of ["sha1", "sha256"]) test("native " + format + " revisions reuse one object store and remain separately readable offline", async t => {
@@ -210,7 +293,9 @@ for (const objectFormat of ["sha1", "sha256"]) {
       assert.equal(row.source.commit.length, width);
       assert.equal(row.source.object.length, width);
     }
-    for (const store of ["0.git", "1.git"])
+    const stores = (await readdir(scratch)).filter(name => name.endsWith(".git"));
+    assert.equal(stores.length, 2);
+    for (const store of stores)
       assert.equal(git(f.root, "--git-dir", join(scratch, store), "rev-parse", "--show-object-format=storage"), objectFormat);
     const scoped = await read({ ...f.selection, scope: "lib/semantic", selectFile: path => path.startsWith("src/"), enterDirectory: () => false });
     assert.deepEqual(scoped.map(row => row.path), ["src/image.bin", "src/index.mjs"]);
@@ -227,8 +312,9 @@ test("one reader keeps independently selected native SHA1 and SHA256 stores sepa
   assert.equal(a[1].source.commit, first.child.commit);
   assert.equal(b[1].source.commit, second.child.commit);
   assert.deepEqual(a.map(row => row.bytes), b.map(row => row.bytes));
-  for (const [store, expected] of [["0.git", "sha1"], ["1.git", "sha1"], ["2.git", "sha256"], ["3.git", "sha256"]])
-    assert.equal(git(first.root, "--git-dir", join(scratch, store), "rev-parse", "--show-object-format=storage"), expected);
+  const formats = (await readdir(scratch)).filter(name => name.endsWith(".git")).map(store =>
+    git(first.root, "--git-dir", join(scratch, store), "rev-parse", "--show-object-format=storage"));
+  assert.deepEqual(formats.sort(), ["sha1", "sha1", "sha256", "sha256"]);
   assert.deepEqual(await read(first.selection), a);
 });
 
@@ -245,7 +331,9 @@ test("a SHA256 source cannot be received through a truncated SHA1-shaped identit
   const f = await fixture(t, "sha256"), scratch = join(f.root, "foreign-format-store");
   const read = createPinnedSourceReader({ scratch });
   await assert.rejects(read({ ...f.selection, commit: f.parent.commit.slice(0, 40) }));
-  assert.equal(git(f.root, "--git-dir", join(scratch, "0.git"), "rev-parse", "--show-object-format=storage"), "sha1");
+  const stores = (await readdir(scratch)).filter(name => name.endsWith(".git"));
+  assert.equal(stores.length, 1);
+  assert.equal(git(f.root, "--git-dir", join(scratch, stores[0]), "rev-parse", "--show-object-format=storage"), "sha1");
 });
 
 for (const objectFormat of ["sha1","sha256"]) {
