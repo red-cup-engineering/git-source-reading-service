@@ -27,11 +27,28 @@ maxRepositories=32, maxPaths=100000, maxBytes=67108864})`. It returns a reader f
 only exact committed regular/executable bytes and their source coordinates are
 returned. Declared composed Gitlinks enter their exact pinned commits through the
 caller's resolver; `update=none` and unselected mounts remain outside composition.
-The caller owns absolute disposable scratch and repository credentials. This API
+The caller owns the absolute source-object directory and repository credentials. This API
 grants no access, installation, publication or branch-selection authority.
 
+The directory is reusable across reader construction and process restart. One
+native object database is selected by exact repository and object format, with
+its owner and physical directory identities received before use. A different
+repository never repoints an ordinal database. Retain this directory with the
+original source owner; publication/build scratch has a separate terminal
+lifetime. Only missing commits and selected blobs are acquired. Transport
+credentials enter through the environment provider, never a retained URL.
+
+Presence checks and acquisitions share Git's native `update-ref --stdin`
+prepared transaction on an absent private ref. Aborting the transaction or
+closing its input releases the lease without publishing a ref. This serializes
+independent warm readers before they decide what is missing. Cold initialization
+is serialized between factories in the same process; the host retains its
+original cross-process publication/acquisition admission. Native object stores
+are never reconfigured to accept changed origins, formats, aliases or executable
+configuration. Unknown or changed custody preserves the original store.
+
 The exact-commit reader supports full lowercase SHA-1 (40 hexadecimal characters)
-and SHA-256 (64 hexadecimal characters) identities. Each disposable object store
+and SHA-256 (64 hexadecimal characters) identities. Each source object store
 is initialized with native Git's explicit matching `--object-format`, and its
 actual storage format is received before fetching. An ambient `GIT_DEFAULT_HASH`
 cannot choose another format. Native Git still owns commit/blob verification and

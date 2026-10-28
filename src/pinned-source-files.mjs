@@ -1,12 +1,22 @@
 import { execFile, execFileSync } from "node:child_process";
 import { existsSync, mkdirSync } from "node:fs";
-import { mkdir, mkdtemp, lstat, realpath, readFile, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, lstat, realpath, readFile, rm, open } from "node:fs/promises";
 import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, dirname, resolve } from "node:path";
 import { readTreeEntries, takeBatchRecord, readIndexEntries, gitWorktreePlan } from "./git-command-codec.mjs";
 import { composed, containedGitmodulePath, parseGitmodules } from "./gitmodules.mjs";
 
 const oid = value => typeof value === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value);
+// Factories in one process share initialization custody, never credentials or
+// cached admission. Every reconstruction still validates the original store.
+const initializingStores = new Map();
+function initializeStore(directory, initialize) {
+  const pending = (initializingStores.get(directory) ?? Promise.resolve()).catch(() => {}).then(initialize);
+  initializingStores.set(directory, pending);
+  const retire = () => { if (initializingStores.get(directory) === pending) initializingStores.delete(directory); };
+  pending.then(retire, retire);
+  return pending;
+}
 const sourcePath = value => {
   if (value !== "" && !containedGitmodulePath(value))
     throw new TypeError("pinned source paths must stay within their repository");
@@ -15,15 +25,15 @@ const sourcePath = value => {
 
 /**
  * Read selected regular files from exact commits, entering only selected, composed gitlinks.
- * The caller owns one disposable scratch directory and resolves declared child repositories.
+ * The caller owns the source-object directory and resolves declared child repositories.
  * Git owns object acquisition and decoding; no checkout, branch selection, lifecycle or hook runs.
- * A reader shares fetched object stores between packages of the same landing.
+ * Repository/object-format stores survive reader reconstruction in that same directory.
  * environmentForRepository can supply credentials for each selected repository;
  * those values stay with that repository's object store, including lazy reads.
  */
 export function createPinnedSourceReader({ scratch, environment = {}, environmentForRepository, resolveSubmodule, rejectSelectedNonRegular = false,
   maxRepositories = 32, maxPaths = 100_000, maxBytes = 64 * 1024 * 1024 } = {}) {
-  if (typeof scratch !== "string" || !isAbsolute(scratch)) throw new TypeError("an absolute disposable source directory is required");
+  if (typeof scratch !== "string" || !isAbsolute(scratch) || resolve(scratch) !== scratch) throw new TypeError("an absolute source-object directory is required");
   if (environmentForRepository !== undefined && typeof environmentForRepository !== "function")
     throw new TypeError("a repository environment provider must be callable");
   if (typeof rejectSelectedNonRegular !== "boolean") throw new TypeError("strict selected-file receiving must be boolean");
@@ -49,45 +59,153 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0", GIT_CONFIG_PARAMETERS: "",
         GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1",
       } : { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0", ...(localOnly ? { GIT_NO_LAZY_FETCH: "1" } : {}) } },
-    (error, stdout) => error ? reject(error) : resolve(stdout));
+    (error, stdout, stderr) => {
+      if (error) { error.stdout = stdout; error.stderr = stderr; reject(error); }
+      else resolve(stdout);
+    });
     child.stdin.on("error", reject);
     child.stdin.end(input);
   });
   const transferFor = (gitDir, operation) => {
-    const pending = (transfers.get(gitDir) ?? Promise.resolve()).then(operation);
+    const pending = (transfers.get(gitDir) ?? Promise.resolve()).then(() => nativeTransfer(gitDir, operation));
     transfers.set(gitDir, pending);
     // A failed store stays failed; no replacement allocation hides its outcome.
     pending.catch(() => {});
     return pending;
   };
+  // Git owns the cross-process lease too. An uncommitted verify transaction
+  // locks this absent ref; abort/EOF releases it without creating a ref or a
+  // second lock journal. Parent death closes stdin and Git aborts the lease.
+  // Acquiring it before the presence check avoids duplicate cold transfers.
+  const nativeTransfer = async (gitDir, operation) => {
+    let stdout = "", prepared = false, releasePrepared, rejectPrepared;
+    const ready = new Promise((yes, no) => { releasePrepared = yes; rejectPrepared = no; });
+    const completion = new Promise(resolveCompletion => {
+      const child = execFile("git", ["--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+        "-c", `core.filesRefLockTimeout=${transfer}`, "--git-dir", gitDir, "update-ref", "--no-deref", "--stdin"],
+      { encoding: "utf8", maxBuffer: 4096, env: { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1" } },
+      (error, output, stderr) => {
+        if (!prepared) rejectPrepared(error ?? new Error("native source transfer lease ended before preparation"));
+        resolveCompletion({ error, output, stderr });
+      });
+      child.stdout.on("data", bytes => {
+        stdout += bytes;
+        if (!prepared && stdout.includes("prepare: ok\n")) { prepared = true; releasePrepared(child); }
+      });
+      child.stdin.on("error", rejectPrepared);
+      child.stdin.write("start\nverify refs/source-reader-transfer\nprepare\n");
+    });
+    let child;
+    try {
+      child = await ready;
+      const value = await operation();
+      if (child.exitCode !== null || child.signalCode !== null) throw new Error("native source transfer lease ended during acquisition");
+      return value;
+    } finally {
+      if (child && !child.stdin.destroyed) child.stdin.end("abort\n");
+      const ended = await completion;
+      if (child && ended.error) throw ended.error;
+    }
+  };
+  const objectMetadata = async (gitDir, objects, expectedType) => {
+    const check = selected => run(["cat-file", "--batch-check"], { gitDir, input: selected.join("\n") + "\n", localOnly: true });
+    try { return selectedObjectMetadata(objects, await check(objects), expectedType); }
+    catch (error) {
+      // Native Git can report an absent promised object by terminating the
+      // batch instead of emitting a `missing` row. This is the same positive
+      // local-absence answer consumed by the original synchronous adapter.
+      // Neither form authorizes a lazy transfer during metadata observation.
+      if (!/could not fetch [0-9a-f]+ from promisor remote/u.test(String(error.stderr))) throw error;
+      const received = { sizes: new Map(), missing: [] };
+      for (const object of objects) {
+        try {
+          const one = selectedObjectMetadata([object], await check([object]), expectedType);
+          for (const [id, size] of one.sizes) received.sizes.set(id, size);
+          received.missing.push(...one.missing);
+        } catch (unavailable) {
+          if (!String(unavailable.stderr).includes("could not fetch " + object + " from promisor remote")) throw unavailable;
+          received.missing.push(object);
+        }
+      }
+      return received;
+    }
+  };
   const storeFor = (repository, commit) => {
     if (typeof repository !== "string" || !repository || repository.startsWith("-") || /[\r\n\0]/u.test(repository) || !oid(commit))
       throw new TypeError("a repository and exact commit are required");
+    if (/^[a-z][a-z0-9+.-]*:\/\//iu.test(repository)) {
+      const url = new URL(repository);
+      if (url.password || url.username && url.protocol !== "ssh:" || url.search || url.hash)
+        throw new TypeError("source repository must not contain credentials or parameters; use its environment provider");
+    }
     // Revisions share the repository's native object database. A new commit
     // does not allocate another copy of all unchanged objects.
     const key = repository + "\0" + commit.length;
     if (!stores.has(key)) {
       if (stores.size >= maxRepositories) throw new RangeError("pinned source repository bound exceeded");
-      const gitDir = join(scratch, String(stores.size) + ".git");
-      stores.set(key, (async () => {
+      const objectFormat = commit.length === 40 ? "sha1" : "sha256";
+      const gitDir = join(scratch, createHash("sha256").update(JSON.stringify([repository, objectFormat])).digest("hex") + ".git");
+      stores.set(key, initializeStore(gitDir, async () => {
         const supplied = await environmentForRepository?.(repository);
         if (supplied !== undefined && (supplied === null || typeof supplied !== "object" || Array.isArray(supplied)))
           throw new TypeError("a repository environment provider must return an environment object");
         repositoryEnvironments.set(gitDir, { ...supplied });
-        await mkdir(scratch, { recursive: true });
-        const objectFormat = commit.length === 40 ? "sha1" : "sha256";
-        await run(["init", "--bare", "--quiet", "--template=", "--object-format=" + objectFormat, gitDir]);
+        await mkdir(scratch, { recursive: true, mode: 0o700 });
+        const physical = async path => {
+          const st = await lstat(path, { bigint: true });
+          if (!st.isDirectory() || await realpath(path) !== path || (st.mode & 0o022n) || process.getuid && st.uid !== BigInt(process.getuid()))
+            throw new TypeError("source-object custody must be an unredirected owned directory");
+          return { device: String(st.dev), inode: String(st.ino) };
+        };
+        const owner = await physical(scratch);
+        let created = false;
+        try { await mkdir(gitDir, { mode: 0o700 }); created = true; } catch (error) { if (error.code !== "EEXIST") throw error; }
+        const expected = JSON.stringify({ kind: "git.pinned-source-object-store/v1", repository, objectFormat, owner, directory: await physical(gitDir) });
+        const record = join(gitDir, "source-store.json");
+        if (created) {
+          const file = await open(record, "wx", 0o600);
+          try { await file.writeFile(expected); await file.sync(); } finally { await file.close(); }
+        }
+        const recordStat = await lstat(record);
+        if (!recordStat.isFile() || recordStat.nlink !== 1 || recordStat.size > 4096 || (recordStat.mode & 0o022) || await realpath(record) !== record || await readFile(record, "utf8") !== expected)
+          throw new TypeError("source-object repository, format or physical custody changed");
+        if (created) {
+          await run(["init", "--bare", "--quiet", "--template=", "--object-format=" + objectFormat, gitDir]);
+          for (const args of pinnedStoreConfiguration(repository)) await run(args, { gitDir });
+        }
+        const config = join(gitDir, "config"), configStat = await lstat(config);
+        if (!configStat.isFile() || configStat.size > 131072 || await realpath(config) !== config)
+          throw new TypeError("source-object native configuration is unsafe");
+        const configuration = await run(["config", "--file", config, "--no-includes", "--null", "--list"], { isolated: true });
+        const controls = new Map();
+        for (const row of configuration.toString("utf8").split("\0").filter(Boolean)) {
+          const at = row.indexOf("\n"), name = row.slice(0, at), value = row.slice(at + 1);
+          const accepted = name === "core.repositoryformatversion" && ["0", "1"].includes(value)
+            || name === "core.filemode" && ["true", "false"].includes(value)
+            || name === "core.bare" && value === "true"
+            || name === "extensions.objectformat" && value === objectFormat
+            || name === "remote.origin.url" && value === repository
+            || name === "remote.origin.promisor" && value === "true"
+            || name === "remote.origin.partialclonefilter" && value === "blob:none";
+          if (at < 0 || !accepted || controls.has(name)) throw new TypeError("source-object native configuration differs from its owner");
+          controls.set(name, value);
+        }
+        if (!["core.repositoryformatversion", "core.bare", "remote.origin.url", "remote.origin.promisor", "remote.origin.partialclonefilter"].every(name => controls.has(name)))
+          throw new TypeError("source-object native configuration is incomplete");
+        for (const name of ["commondir", "objects/info/alternates", "objects/info/http-alternates", "info/grafts", "config.worktree"]) {
+          try { await lstat(join(gitDir, name)); } catch (error) { if (error.code === "ENOENT") continue; throw error; }
+          throw new TypeError("source-object native routing differs from its owner");
+        }
         const storedFormat = (await run(["rev-parse", "--show-object-format=storage"], { gitDir })).toString("utf8").trim();
         if (storedFormat !== objectFormat) throw new Error("pinned source storage format differs from its exact object identity");
-        for (const args of pinnedStoreConfiguration(repository)) await run(args, { gitDir });
         return gitDir;
-      })());
+      }));
     }
     const selected = key + "\0" + commit;
     if (!commits.has(selected)) commits.set(selected, (async () => {
       const gitDir = await stores.get(key);
       await transferFor(gitDir, async () => {
-        const held = selectedObjectMetadata([commit], await run(["cat-file", "--batch-check"], { gitDir, input: commit + "\n", localOnly: true }), "commit");
+        const held = await objectMetadata(gitDir, [commit], "commit");
         if (held.missing.length) await run(pinnedCommitFetchArguments(commit), { gitDir, timeout: transfer });
         await run(["cat-file", "-e", commit + "^{commit}"], { gitDir, localOnly: true });
       });
@@ -123,10 +241,10 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         // thousands of files never finished; the selected blobs are fetched first in one request, as git's own
         // lazy fetch would fetch one (fetch --stdin of their ids, no negotiation), and then read locally.
         const metadata = await transferFor(gitDir, async () => {
-          let received = selectedObjectMetadata(objects, await run(["cat-file", "--batch-check"], { gitDir, input, localOnly: true }), "blob");
+          let received = await objectMetadata(gitDir, objects, "blob");
           if (received.missing.length) {
             await run(selectedBlobFetchArguments, { gitDir, input: received.missing.join("\n") + "\n", timeout: transfer });
-            received = selectedObjectMetadata(objects, await run(["cat-file", "--batch-check"], { gitDir, input, localOnly: true }), "blob");
+            received = await objectMetadata(gitDir, objects, "blob");
           }
           return received;
         });
