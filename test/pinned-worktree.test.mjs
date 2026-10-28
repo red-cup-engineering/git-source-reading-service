@@ -24,6 +24,12 @@ test('genuine detached root retains exact source, independent of dirty original,
  await Promise.all([held.dispose(),held.dispose()]);await assert.rejects(readFile(join(held.directory,'source.mjs')),{code:'ENOENT'});
  assert.equal(await readFile(join(f.repository,'source.mjs'),'utf8'),'dirty original');await assert.rejects(held.verify(),/disposed/);
 });
+test('native materialization remains usable under a group-writable host umask',async t=>{
+ const f=await fixture(t),previous=process.umask(0o002);t.after(()=>process.umask(previous));
+ const held=await f.reader.materialize({repository:f.repository,commit:f.commit});
+ assert.equal((await held.verify()).files,2);assert.equal(git(held.directory,'rev-parse','HEAD'),f.commit);
+ await held.dispose();
+});
 test('mutating returned evidence cannot authorize changed source',async t=>{
  const f=await fixture(t),held=await f.reader.materialize({repository:f.repository,commit:f.commit});
  await writeFile(join(held.directory,'source.mjs'),'wrong');held.entries.find(x=>x.path==='source.mjs').bytes=Buffer.from('wrong');
