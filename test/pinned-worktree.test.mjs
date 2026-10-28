@@ -71,12 +71,14 @@ test('source bounds and unsupported scope refuse',async t=>{
 test('returned source credentials do not exist and native materialization drops acquisition-only environment',async t=>{
  const f=await fixture(t),bin=join(f.root,'bin');await mkdir(bin);
  const nativeGit=execFileSync('which',['git'],{encoding:'utf8'}).trim();
- const log=join(f.root,'worktree-environment');
- await writeFile(join(bin,'git'),`#!/bin/sh\ncase " $* " in *" worktree "*) printf '%s' "\${ACQUISITION_ONLY_SENTINEL-absent}" >> '${log}';; esac\nexec '${nativeGit}' "$@"\n`,{mode:0o755});
+ const log=join(f.root,'worktree-environment'),traceLog=join(f.root,'git-trace-context');
+ await writeFile(join(bin,'git'),`#!/bin/sh\nprintf '%s\\n' "\${TRACEPARENT-absent}" >> '${traceLog}'\ncase " $* " in *" worktree "*) printf '%s' "\${ACQUISITION_ONLY_SENTINEL-absent}" >> '${log}';; esac\nexec '${nativeGit}' "$@"\n`,{mode:0o755});
  const old=process.env.PATH;process.env.PATH=bin+':'+old;t.after(()=>{process.env.PATH=old;});
- const reader=createPinnedSourceReader({scratch:f.scratch,environmentForRepository:()=>({ACQUISITION_ONLY_SENTINEL:'private-acquisition-context'})});
+ const traceparent='00-0123456789abcdef0123456789abcdef-0123456789abcdef-01';
+ const reader=createPinnedSourceReader({scratch:f.scratch,environmentForRepository:()=>({ACQUISITION_ONLY_SENTINEL:'private-acquisition-context',TRACEPARENT:traceparent})});
  const held=await reader.materialize({repository:f.repository,commit:f.commit});await held.dispose();
  assert.equal(await readFile(log,'utf8'),'absentabsent');assert.deepEqual(Object.keys(held).sort(),['commit','directory','dispose','entries','kind','repository','verify','version']);
+ const traces=(await readFile(traceLog,'utf8')).trim().split('\n');assert.ok(traces.length>10);assert.ok(traces.every(value=>value===traceparent),'every native Git command keeps the selected source trace, including isolated reads');
 });
 test('redirected scratch parent creates nothing outside custody',async t=>{
  const f=await fixture(t);await mkdir(join(f.root,'outside'));await symlink(join(f.root,'outside'),join(f.root,'redirect'));

@@ -46,7 +46,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
   // Metadata commands answer at once; a fetch and the batch reads move content (a blobless store fetches each
   // selected blob as it is read), bounded by maxBytes, so their time is the transfer's, not a metadata answer's.
   const transfer = Math.max(120_000, Math.ceil(maxBytes / (256 * 1024)) * 1000);
-  const run = (args, { gitDir, input, timeout = 30_000, isolated = false, localOnly = false } = {}) => new Promise((resolve, reject) => {
+  const run = (args, { gitDir, environmentDirectory = gitDir, input, timeout = 30_000, isolated = false, localOnly = false } = {}) => new Promise((resolve, reject) => {
     const child = execFile("git", [
       "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never",
       // a disposable store is never repacked or maintained: each lazy fetch would otherwise start a background gc
@@ -56,9 +56,13 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     ], { encoding: "buffer", timeout, maxBuffer: maxBytes + 16 * 1024 * 1024,
       env: isolated ? {
         ...Object.fromEntries(["PATH", "LANG", "LC_ALL", "TZ", "SystemRoot", "WINDIR"].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
+        ...Object.fromEntries(["TRACEPARENT", "TRACESTATE"].flatMap(key => {
+          const value = repositoryEnvironments.get(environmentDirectory)?.[key] ?? environment[key] ?? process.env[key];
+          return typeof value === "string" ? [[key, value]] : [];
+        })),
         GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0", GIT_CONFIG_PARAMETERS: "",
         GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1",
-      } : { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0", ...(localOnly ? { GIT_NO_LAZY_FETCH: "1" } : {}) } },
+      } : { ...process.env, ...environment, ...repositoryEnvironments.get(environmentDirectory), GIT_TERMINAL_PROMPT: "0", ...(localOnly ? { GIT_NO_LAZY_FETCH: "1" } : {}) } },
     (error, stdout, stderr) => {
       if (error) { error.stdout = stdout; error.stderr = stderr; reject(error); }
       else resolve(stdout);
@@ -170,13 +174,13 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         if (!recordStat.isFile() || recordStat.nlink !== 1 || recordStat.size > 4096 || (recordStat.mode & 0o022) || await realpath(record) !== record || await readFile(record, "utf8") !== expected)
           throw new TypeError("source-object repository, format or physical custody changed");
         if (created) {
-          await run(["init", "--bare", "--quiet", "--template=", "--object-format=" + objectFormat, gitDir]);
+          await run(["init", "--bare", "--quiet", "--template=", "--object-format=" + objectFormat, gitDir], { environmentDirectory: gitDir });
           for (const args of pinnedStoreConfiguration(repository)) await run(args, { gitDir });
         }
         const config = join(gitDir, "config"), configStat = await lstat(config);
         if (!configStat.isFile() || configStat.size > 131072 || await realpath(config) !== config)
           throw new TypeError("source-object native configuration is unsafe");
-        const configuration = await run(["config", "--file", config, "--no-includes", "--null", "--list"], { isolated: true });
+        const configuration = await run(["config", "--file", config, "--no-includes", "--null", "--list"], { isolated: true, environmentDirectory: gitDir });
         const controls = new Map();
         for (const row of configuration.toString("utf8").split("\0").filter(Boolean)) {
           const at = row.indexOf("\n"), name = row.slice(0, at), value = row.slice(at + 1);
@@ -313,7 +317,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     if (!configStat.isFile() || configStat.size > 131072 || await realpath(configPath) !== configPath)
       throw new TypeError("pinned worktree requires bounded regular native configuration");
     const admittedConfig = await readFile(configPath);
-    const configuration = await run(["config", "--file", configPath, "--no-includes", "--null", "--list"], { isolated: true });
+    const configuration = await run(["config", "--file", configPath, "--no-includes", "--null", "--list"], { isolated: true, environmentDirectory: gitDir });
     if (!(await readFile(configPath)).equals(admittedConfig)) throw new TypeError("pinned worktree configuration changed during admission");
     const seen = new Set();
     for (const row of configuration.toString("utf8").split("\0").filter(Boolean)) {
@@ -384,7 +388,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     const verify = async () => {
       await controls();
       // Explicit --git-dir would otherwise observe the bare store rather than its worktree.
-      const observed = async args => (await run(["-c", "core.fsmonitor=false", "-C", directory, ...args], { gitDir: metadata, isolated: true })).toString("utf8").trim();
+      const observed = async args => (await run(["-c", "core.fsmonitor=false", "-C", directory, ...args], { gitDir: metadata, environmentDirectory: gitDir, isolated: true })).toString("utf8").trim();
       if (await observed(["rev-parse", "HEAD^{commit}"]) !== commit || await observed(["rev-parse", "--show-toplevel"]) !== directory)
         throw new TypeError("pinned worktree source identity changed");
       const indexPath = join(metadata, "index"), indexStat = await lstat(indexPath);
