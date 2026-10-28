@@ -31,31 +31,41 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     || !Number.isSafeInteger(maxPaths) || maxPaths < 1 || maxPaths > 1_000_000
     || !Number.isSafeInteger(maxBytes) || maxBytes < 1 || maxBytes > 512 * 1024 * 1024)
     throw new TypeError("finite pinned source repository, path and byte bounds are required");
-  const stores = new Map();
+  const stores = new Map(), commits = new Map(), transfers = new Map();
   const repositoryEnvironments = new Map();
   // Metadata commands answer at once; a fetch and the batch reads move content (a blobless store fetches each
   // selected blob as it is read), bounded by maxBytes, so their time is the transfer's, not a metadata answer's.
   const transfer = Math.max(120_000, Math.ceil(maxBytes / (256 * 1024)) * 1000);
-  const run = (args, { gitDir, input, timeout = 30_000, isolated = false } = {}) => new Promise((resolve, reject) => {
+  const run = (args, { gitDir, input, timeout = 30_000, isolated = false, localOnly = false } = {}) => new Promise((resolve, reject) => {
     const child = execFile("git", [
       "--no-replace-objects", "-c", "core.hooksPath=/dev/null", "-c", "protocol.ext.allow=never",
       // a disposable store is never repacked or maintained: each lazy fetch would otherwise start a background gc
       "-c", "gc.auto=0", "-c", "maintenance.auto=false",
+      ...(localOnly ? ["-c", "remote.origin.promisor=false"] : []),
       ...(gitDir ? ["--git-dir", gitDir] : []), ...args,
     ], { encoding: "buffer", timeout, maxBuffer: maxBytes + 16 * 1024 * 1024,
       env: isolated ? {
         ...Object.fromEntries(["PATH", "LANG", "LC_ALL", "TZ", "SystemRoot", "WINDIR"].filter(key => process.env[key] !== undefined).map(key => [key, process.env[key]])),
         GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_SYSTEM: "/dev/null", GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_COUNT: "0", GIT_CONFIG_PARAMETERS: "",
         GIT_TERMINAL_PROMPT: "0", GIT_NO_LAZY_FETCH: "1", GIT_LFS_SKIP_SMUDGE: "1",
-      } : { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0" } },
+      } : { ...process.env, ...environment, ...repositoryEnvironments.get(gitDir), GIT_TERMINAL_PROMPT: "0", ...(localOnly ? { GIT_NO_LAZY_FETCH: "1" } : {}) } },
     (error, stdout) => error ? reject(error) : resolve(stdout));
     child.stdin.on("error", reject);
     child.stdin.end(input);
   });
+  const transferFor = (gitDir, operation) => {
+    const pending = (transfers.get(gitDir) ?? Promise.resolve()).then(operation);
+    transfers.set(gitDir, pending);
+    // A failed store stays failed; no replacement allocation hides its outcome.
+    pending.catch(() => {});
+    return pending;
+  };
   const storeFor = (repository, commit) => {
     if (typeof repository !== "string" || !repository || repository.startsWith("-") || /[\r\n\0]/u.test(repository) || !oid(commit))
       throw new TypeError("a repository and exact commit are required");
-    const key = repository + "\0" + commit;
+    // Revisions share the repository's native object database. A new commit
+    // does not allocate another copy of all unchanged objects.
+    const key = repository + "\0" + commit.length;
     if (!stores.has(key)) {
       if (stores.size >= maxRepositories) throw new RangeError("pinned source repository bound exceeded");
       const gitDir = join(scratch, String(stores.size) + ".git");
@@ -70,12 +80,20 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         const storedFormat = (await run(["rev-parse", "--show-object-format=storage"], { gitDir })).toString("utf8").trim();
         if (storedFormat !== objectFormat) throw new Error("pinned source storage format differs from its exact object identity");
         for (const args of pinnedStoreConfiguration(repository)) await run(args, { gitDir });
-        await run(pinnedCommitFetchArguments(commit), { gitDir, timeout: transfer });
-        await run(["cat-file", "-e", commit + "^{commit}"], { gitDir });
         return gitDir;
       })());
     }
-    return stores.get(key);
+    const selected = key + "\0" + commit;
+    if (!commits.has(selected)) commits.set(selected, (async () => {
+      const gitDir = await stores.get(key);
+      await transferFor(gitDir, async () => {
+        const held = selectedObjectMetadata([commit], await run(["cat-file", "--batch-check"], { gitDir, input: commit + "\n", localOnly: true }), "commit");
+        if (held.missing.length) await run(pinnedCommitFetchArguments(commit), { gitDir, timeout: transfer });
+        await run(["cat-file", "-e", commit + "^{commit}"], { gitDir, localOnly: true });
+      });
+      return gitDir;
+    })());
+    return commits.get(selected);
   };
   const reader = async function readPinnedSourceFiles({ repository, commit, scope = "", selectFile, enterDirectory } = {}) {
     scope = sourcePath(scope);
@@ -104,13 +122,16 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
         // A blobless store fetches each missing blob in its own round trip as cat-file reads it, so a package of
         // thousands of files never finished; the selected blobs are fetched first in one request, as git's own
         // lazy fetch would fetch one (fetch --stdin of their ids, no negotiation), and then read locally.
-        await run(selectedBlobFetchArguments, { gitDir, input, timeout: transfer });
-        const sizes = new Map((await run(["cat-file", "--batch-check"], { gitDir, input, timeout: transfer })).toString("utf8").trimEnd().split("\n").map(row => {
-          const [object, type, size] = row.split(" ");
-          if (!oid(object) || type !== "blob" || !/^\d+$/u.test(size ?? "") || !Number.isSafeInteger(Number(size)))
-            throw new Error("pinned source blob is unavailable");
-          return [object, Number(size)];
-        }));
+        const metadata = await transferFor(gitDir, async () => {
+          let received = selectedObjectMetadata(objects, await run(["cat-file", "--batch-check"], { gitDir, input, localOnly: true }), "blob");
+          if (received.missing.length) {
+            await run(selectedBlobFetchArguments, { gitDir, input: received.missing.join("\n") + "\n", timeout: transfer });
+            received = selectedObjectMetadata(objects, await run(["cat-file", "--batch-check"], { gitDir, input, localOnly: true }), "blob");
+          }
+          return received;
+        });
+        if (metadata.missing.length) throw new Error("pinned source blob is unavailable");
+        const sizes = metadata.sizes;
         for (const entry of selected) {
           if (!sizes.has(entry.object)) throw new Error("pinned source blob size was not received");
           bytes += sizes.get(entry.object);
@@ -311,6 +332,20 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
   };
   return reader;
 
+}
+
+function selectedObjectMetadata(objects, output, expectedType) {
+  const rows = output.toString("utf8").trimEnd().split("\n"), sizes = new Map(), missing = [];
+  if (rows.length !== objects.length) throw new Error("selected object metadata count differs");
+  for (let index = 0; index < rows.length; index++) {
+    const [object, type, size] = rows[index].split(" ");
+    if (object !== objects[index]) throw new Error("selected object metadata identity differs");
+    if (type === "missing") { missing.push(object); continue; }
+    if (type !== expectedType || !/^\d+$/u.test(size ?? "") || !Number.isSafeInteger(Number(size)))
+      throw new Error("selected native object has the wrong type or size");
+    sizes.set(object, Number(size));
+  }
+  return { sizes, missing };
 }
 
 // These native argument plans are shared by the disposable async reader and

@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, writeFile, chmod, rm, symlink, lstat } from "node:fs/promises";
+import { mkdtemp, mkdir, writeFile, chmod, rm, symlink, lstat, rename, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createPinnedSourceReader, receivePinnedRepositoryCommitSync, readGitBlobObjectsSync } from "../src/pinned-source-files.mjs";
@@ -65,6 +65,38 @@ test("each selected repository receives its own environment once across repeated
   assert.deepEqual(asked, [f.parent.dir, f.child.dir]);
   assert.deepEqual(second, first);
   assert.equal(first[1].bytes.toString(), "export const received = 'pinned';\n");
+});
+
+test("a warm exact source read works with its remote unavailable and creates no replacement store", async t => {
+  const f = await fixture(t), scratch = join(f.root, "warm-objects");
+  const read = createPinnedSourceReader({ scratch });
+  const request = { repository: f.parent.dir, commit: f.parent.commit,
+    selectFile: path => path === "package.json", enterDirectory: () => false };
+  const first = await read(request);
+  const before = await readdir(scratch);
+  await rename(f.parent.dir, f.parent.dir + ".offline");
+  assert.deepEqual(await read(request), first);
+  assert.deepEqual(await readdir(scratch), before);
+});
+
+for (const format of ["sha1", "sha256"]) test("native " + format + " revisions reuse one object store and remain separately readable offline", async t => {
+  const f = await fixture(t, format), scratch = join(f.root, "revision-objects");
+  await writeFile(join(f.parent.dir, "package.json"), '{"version":"2.0.0"}\n');
+  git(f.parent.dir, "add", "package.json"); git(f.parent.dir, "commit", "-qm", "Changed selected input");
+  const next = git(f.parent.dir, "rev-parse", "HEAD");
+  const read = createPinnedSourceReader({ scratch, maxRepositories: 1 });
+  const selection = { repository: f.parent.dir, selectFile: path => path === "package.json", enterDirectory: () => false };
+  const [oldRows, newRows] = await Promise.all([
+    read({ ...selection, commit: f.parent.commit }), read({ ...selection, commit: next }),
+  ]);
+  assert.equal(oldRows[0].bytes.toString(), "{}\n");
+  assert.equal(newRows[0].bytes.toString(), '{"version":"2.0.0"}\n');
+  assert.equal((await readdir(scratch)).filter(name => name.endsWith(".git")).length, 1);
+  await rename(f.parent.dir, f.parent.dir + ".offline");
+  assert.deepEqual(await read({ ...selection, commit: f.parent.commit }), oldRows);
+  assert.deepEqual(await read({ ...selection, commit: next }), newRows);
+  await assert.rejects(read({ ...selection, commit: "a".repeat(format === "sha1" ? 40 : 64) }));
+  assert.equal((await readdir(scratch)).filter(name => name.endsWith(".git")).length, 1);
 });
 
 test("a missing repository environment refuses before acquiring that selected source", async t => {
