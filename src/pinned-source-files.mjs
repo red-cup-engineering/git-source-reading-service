@@ -301,7 +301,7 @@ export function createPinnedSourceReader({ scratch, environment = {}, environmen
     const parent = dirname(scratch);
     if (resolve(scratch) !== scratch || await realpath(parent) !== parent || !(await lstat(parent)).isDirectory())
       throw new TypeError("pinned worktree scratch parent must be an existing unredirected directory");
-    await mkdir(scratch, { recursive: true });
+    await mkdir(scratch, { recursive: true, mode: 0o700 });
     const scratchStat = await lstat(scratch);
     if (!scratchStat.isDirectory() || await realpath(scratch) !== scratch)
       throw new TypeError("pinned worktree scratch must be an unredirected directory");
