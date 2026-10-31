@@ -30,8 +30,8 @@ test("the worktree plan's status reads back what Git reports for a rename, an ed
   context.after(() => rmSync(root, { recursive: true, force: true }));
   const git = (...arguments_) => spawnSync("git", arguments_, { cwd: root, encoding: "utf8" });
   git("init", "--initial-branch=main");
-  git("config", "user.email", "house@example.invalid");
-  git("config", "user.name", "House");
+  git("config", "user.email", "group@example.invalid");
+  git("config", "user.name", "Group");
   writeFileSync(path.join(root, "kept.txt"), "kept\n");
   writeFileSync(path.join(root, "was.txt"), "a file long enough that Git sees its move as a rename\n");
   git("add", ".");
