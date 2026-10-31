@@ -1,6 +1,6 @@
 {
   "name": "@red-cup-engineering/git-source-reading-service",
-  "version": "0.1.7",
+  "version": "0.1.8-dev.0",
   "private": false,
   "type": "module",
   "description": "Read authored files from explicitly scoped, composed Git repositories using native Git object and configuration readers.",
@@ -13,17 +13,21 @@
     "./pinned-source-files": "./src/pinned-source-files.mjs",
     "./git-command-codec": "./src/git-command-codec.mjs",
     "./gitmodules": "./src/gitmodules.mjs",
-    "./source-working-copy-schema": "./src/source-working-copy-schema.mjs"
+    "./source-working-copy-schema": "./src/source-working-copy-schema.mjs",
+    "./git-object-id": "./src/git-object-id.mjs",
+    "./source-path-proof": "./src/source-path-proof.mjs",
+    "./source-tree-patch": "./src/source-tree-patch.mjs"
   },
   "files": [
     "src",
-    "README.md"
+    "README.md",
+    "test"
   ],
   "engines": {
     "node": ">=22.18"
   },
   "scripts": {
-    "check": "node --check src/read-source-files.mjs && node --check src/pinned-source-files.mjs && node --check src/git-command-codec.mjs && node --check src/gitmodules.mjs && node --check src/source-working-copy-schema.mjs",
+    "check": "node --check src/read-source-files.mjs && node --check src/pinned-source-files.mjs && node --check src/git-command-codec.mjs && node --check src/gitmodules.mjs && node --check src/source-working-copy-schema.mjs && node --check src/git-object-id.mjs && node --check src/source-path-proof.mjs && node --check src/source-tree-patch.mjs",
     "test": "node --test test/*.test.mjs",
     "verify": "npm run check && npm test"
   },
@@ -31,5 +35,16 @@
   "funding": {
     "type": "individual",
     "url": "https://github.com/561-group/.github/blob/main/TIPS.md"
-  }
+  },
+  "receivingTests": [
+    "test/extraction-mappings.test.mjs",
+    "test/git-command-codec.test.mjs",
+    "test/git-source-tree-request.test.mjs",
+    "test/gitmodules.test.mjs",
+    "test/pinned-source-files.test.mjs",
+    "test/pinned-worktree.test.mjs",
+    "test/read-source-files.test.mjs",
+    "test/source-path-proof.test.mjs",
+    "test/source-tree-patch.test.mjs"
+  ]
 }

@@ -1,5 +1,29 @@
 # Git source reading
 
+## Pure source identity and tree proofs
+
+`./git-object-id`, `./source-path-proof` and `./source-tree-patch` own the
+original SHA-1 Git object identities, complete immediate-tree/path witnesses,
+and bounded source-tree transformations previously implemented by Git Services.
+Git Services forwards those public entrances to these same functions. This
+source move preserves the complete implementations from Git Services commit
+`275129f0dc6a6b2a323430bb7357fc1bc1ac2c17`, including exact leaf-removal
+preconditions and pruning only touched directories emptied by a transformation.
+
+These functions use native cryptographic hashing and local pure readers. They
+do not execute Git, contact a forge, create a candidate, admit Work, or interpret
+a complete tree proof as content or capability acceptance. Existing SHA-1-only
+proof grammar, path/mode checks, duplicate and overlap refusal, and finite
+tree/change bounds remain unchanged. The separately owned pinned-source reader
+retains its existing SHA-1/SHA-256 native object-reading contract.
+
+The package remains free of package dependencies. Native history streaming and
+source-delivery effects are consumed through Git Engine, whose command plans
+and binary output readers come from this service. The original source tests and
+the moved proof tests are included in the native package's `receivingTests` so
+an installed consumer can qualify the same source, including the authentic
+`git filter-repo` prerequisite described below.
+
 <!-- 561-group-standards:badges:start -->
 [![Red Cup Engineering](https://img.shields.io/badge/561%20Group-Red%20Cup%20Engineering-c0392b)](https://github.com/red-cup-engineering)
 [![License: MIT](https://img.shields.io/badge/license-MIT-c0392b)](LICENSE)
