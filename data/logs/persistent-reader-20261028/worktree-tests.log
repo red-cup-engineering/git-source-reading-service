@@ -1,0 +1,22 @@
+✔ genuine detached root retains exact source, independent of dirty original, and disposes once (805.711607ms)
+✔ mutating returned evidence cannot authorize changed source (754.89012ms)
+✔ wrong commit refuses without a materialized copy (337.214172ms)
+✔ committed symlink and Gitlink are outside version one (708.820853ms)
+✔ redirected scratch refuses before acquisition (127.268098ms)
+✔ redirected source refuses verification and preserves foreign destination (400.277218ms)
+✔ HEAD drift refuses verification and effectful disposal (388.975141ms)
+✔ path redirection refuses authored receiving (405.516964ms)
+✔ source bounds and unsupported scope refuse (305.081397ms)
+✔ returned source credentials do not exist and native materialization drops acquisition-only environment (399.501502ms)
+✔ redirected scratch parent creates nothing outside custody (101.471674ms)
+✔ template-supplied smudge filter never executes even when it preserves source bytes (688.806515ms)
+✔ reused store with executable or redirected local configuration refuses before checkout (3824.349943ms)
+✔ native index drift refuses even with identical authored working files (604.808076ms)
+ℹ tests 14
+ℹ suites 0
+ℹ pass 14
+ℹ fail 0
+ℹ cancelled 0
+ℹ skipped 0
+ℹ todo 0
+ℹ duration_ms 10069.785784
