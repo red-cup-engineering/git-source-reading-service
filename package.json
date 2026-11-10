@@ -21,7 +21,9 @@
   "files": [
     "src",
     "README.md",
-    "test"
+    "test",
+    "docs/API.md",
+    "examples/quickstart.test.mjs"
   ],
   "engines": {
     "node": ">=22.18"
@@ -29,7 +31,8 @@
   "scripts": {
     "check": "node --check src/read-source-files.mjs && node --check src/pinned-source-files.mjs && node --check src/git-command-codec.mjs && node --check src/gitmodules.mjs && node --check src/source-working-copy-schema.mjs && node --check src/git-object-id.mjs && node --check src/source-path-proof.mjs && node --check src/source-tree-patch.mjs",
     "test": "node --test test/*.test.mjs",
-    "verify": "npm run check && npm test"
+    "verify": "npm run check && npm test",
+    "test:consumer": "node --test examples/quickstart.test.mjs"
   },
   "license": "MIT",
   "funding": {

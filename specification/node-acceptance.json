@@ -1,0 +1,21 @@
+{
+  "version": 1,
+  "basis": "Plan Git source extraction using an explicitly declared source and destination mapping.",
+  "cases": [
+    {
+      "id": "GIT-SOURCE-READING-SERVICE-REFUSAL",
+      "role": "source",
+      "kind": "refusal",
+      "claim": "Invalid, duplicate and escaping paths are refused before command formation.",
+      "file": "test/extraction-mappings.test.mjs",
+      "test": "invalid, duplicate and escaping mappings refuse before producing a Git command"
+    },
+    {
+      "id": "GIT-SOURCE-READING-SERVICE-QUICKSTART",
+      "role": "consumer",
+      "kind": "example",
+      "claim": "An installed caller obtains the extraction plan that flattens a selected source directory.",
+      "file": "examples/quickstart.test.mjs"
+    }
+  ]
+}
