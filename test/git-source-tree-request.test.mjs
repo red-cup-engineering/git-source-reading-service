@@ -36,3 +36,33 @@ test('source-only multiline message refuses before a commit can normalize its by
   const input=request();input.message='Headline\nBody';
   assert.throws(()=>readGitSourceTreePublicationRequest(input),/single-line/u);
 });
+
+test('source-only removal is the original tree-patch contract bound to an independent regular-file preimage',()=>{
+  const input=request(),before={mode:'100644',type:'blob',sha:'b'.repeat(40)};
+  input.reviewedSource.entries=[{path:'docs/readme.md',...before}];
+  input.outputs=[{path:'docs/readme.md',remove:{...before}}];
+  const decoded=readGitSourceTreePublicationRequest(input);
+  assert.deepEqual(decoded.outputs,input.outputs);assert.ok(Object.isFrozen(decoded.outputs[0].remove));
+  input.outputs[0].remove.sha='c'.repeat(40);
+  assert.equal(decoded.outputs[0].remove.sha,before.sha);
+});
+
+test('removal refuses absence, drift, modes, invented identities and mixtures of remove and byte output',()=>{
+  for(const change of [r=>r.reviewedSource.entries[0]={path:'docs/readme.md',absent:true},
+    r=>r.outputs[0].remove.sha='c'.repeat(40),r=>r.outputs[0].remove.sha='0'.repeat(40),
+    r=>r.outputs[0].remove.mode='100755',r=>r.outputs[0].remove.type='commit',
+    r=>r.outputs[0].remove.extra=true,r=>r.outputs[0].bytesBase64='',r=>r.outputs[0].absent=true,
+    r=>r.outputs.push({...r.outputs[0]})]) {
+    const input=request(),before={mode:'100644',type:'blob',sha:'b'.repeat(40)};
+    input.reviewedSource.entries=[{path:'docs/readme.md',...before}];input.outputs=[{path:'docs/readme.md',remove:{...before}}];
+    change(input);assert.throws(()=>readGitSourceTreePublicationRequest(input),TypeError);
+  }
+});
+
+test('removals do not increase the original selected-path bound',()=>{
+  const input=request(),before={mode:'100644',type:'blob',sha:'b'.repeat(40)};
+  input.paths=Array.from({length:129},(_,index)=>`legacy/${index}.md`);
+  input.reviewedSource.entries=input.paths.map(path=>({path,...before}));
+  input.outputs=input.paths.map(path=>({path,remove:{...before}}));
+  assert.throws(()=>readGitSourceTreePublicationRequest(input),/bound/);
+});

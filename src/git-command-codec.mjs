@@ -43,6 +43,8 @@ const reviewedPath = (value) => typeof value === "string" && value.length > 0
 const exactFields = (value, keys) => record(value) !== undefined && Object.keys(value).length === keys.length
   && keys.every((key) => Object.hasOwn(value, key));
 
+export const SOURCE_TREE_PUBLICATION_LIMITS = Object.freeze({paths:128,blobBytes:2097152,totalBytes:8388608,blobBase64:2796204,totalBase64:11184816});
+
 /** Reviewed identities are data, not permission or an observation of the current source. */
 function readReviewedSource(value, paths, originalPaths) {
   if (!exactFields(value, ["revision", "entries"]) || typeof value.revision !== "string" || !REVIEWED_OID.test(value.revision)
@@ -89,7 +91,7 @@ export function readGitCommitPathsRequest(input) {
     ...(reviewedSource === undefined ? {} : { reviewedSource }) });
 }
 
-/** Admit exact remote regular-file bytes; publication remains the system owner's effect. */
+/** Admit exact remote regular-file bytes or source-bound removal; publication remains the system owner's effect. */
 export function readGitSourceTreePublicationRequest(input) {
   const value = record(input);
   const request = readGitCommitPathsRequest(input);
@@ -102,22 +104,33 @@ export function readGitSourceTreePublicationRequest(input) {
       || !["PUBLIC", "PRIVATE", "INTERNAL"].includes(owner.visibility)
       || typeof owner.account !== "string" || !/^[A-Za-z0-9][A-Za-z0-9-]{0,38}$/u.test(owner.account))
     throw new TypeError("source-only publication requires its exact original repository, audience and account");
-  if (!Array.isArray(value.outputs) || value.outputs.length !== request.paths.length || request.paths.length > 128)
+  if (!Array.isArray(value.outputs) || value.outputs.length !== request.paths.length || request.paths.length > SOURCE_TREE_PUBLICATION_LIMITS.paths)
     throw new TypeError("source-only outputs must name every selected path exactly once within the bound");
   const selected = new Set(request.paths), seen = new Set();
+  const originals = new Map(request.reviewedSource.entries.map(entry => [entry.path, entry]));
   let encodedBytes = 0, decodedBytes = 0;
   const outputs = value.outputs.map(output => {
+    if (Object.hasOwn(output ?? {}, "remove")) {
+      const original = originals.get(output.path), removal = output.remove;
+      if (!exactFields(output, ["path", "remove"]) || !selected.has(output.path) || seen.has(output.path)
+          || !exactFields(removal, ["mode", "type", "sha"]) || removal.mode !== "100644" || removal.type !== "blob"
+          || !REVIEWED_OID.test(removal.sha ?? "") || original?.absent === true
+          || original?.mode !== removal.mode || original?.type !== removal.type || original?.sha !== removal.sha)
+        throw new TypeError("source-only removal requires its exact independently reviewed regular100644 preimage");
+      seen.add(output.path);
+      return Object.freeze({ path: output.path, remove: Object.freeze({ ...removal }) });
+    }
     if (!exactFields(output, ["path", "mode", "bytesBase64", "sha", "sha256"])
         || !selected.has(output.path) || seen.has(output.path) || output.mode !== "100644"
-        || typeof output.bytesBase64 !== "string" || output.bytesBase64.length > 2796204
+        || typeof output.bytesBase64 !== "string" || output.bytesBase64.length > SOURCE_TREE_PUBLICATION_LIMITS.blobBase64
         || !REVIEWED_OID.test(output.sha ?? "") || !/^[a-f0-9]{64}$/u.test(output.sha256 ?? ""))
       throw new TypeError("source-only publication supports one bounded regular100644 byte output per path");
     seen.add(output.path);
     encodedBytes += output.bytesBase64.length;
-    if (encodedBytes > 11184816) throw new TypeError("source-only output bytes exceed the aggregate bound");
+    if (encodedBytes > SOURCE_TREE_PUBLICATION_LIMITS.totalBase64) throw new TypeError("source-only output bytes exceed the aggregate bound");
     const bytes = Buffer.from(output.bytesBase64, "base64");
     decodedBytes += bytes.length;
-    if (bytes.toString("base64") !== output.bytesBase64 || bytes.length > 2097152 || decodedBytes > 8388608)
+    if (bytes.toString("base64") !== output.bytesBase64 || bytes.length > SOURCE_TREE_PUBLICATION_LIMITS.blobBytes || decodedBytes > SOURCE_TREE_PUBLICATION_LIMITS.totalBytes)
       throw new TypeError("source-only output requires canonical bounded base64");
     return Object.freeze({...output});
   }).sort((a, b) => a.path < b.path ? -1 : a.path > b.path ? 1 : 0);

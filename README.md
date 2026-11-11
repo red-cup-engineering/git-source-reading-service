@@ -251,12 +251,31 @@ or replacement cannot pass merely because the working file still looks right.
 `readGitSourceTreePublicationRequest` reuses the exact-path/reviewedSource
 decoder and additionally admits an explicit original GitHub name, stable node
 identity, visibility and authenticated-account expectation, plus one exact
-regular100644 output per selected path. Output bytes use canonical base64 and
+regular100644 output or exact removal per selected path. Output bytes use canonical base64 and
 explicit SHA-1 Gitblob and SHA-256 identities. Selected originals must be
 regular100644 blobs or explicit absence. File and aggregate byte/population
 limits apply before decoding. The publisher independently proves those byte
 identities, original ownership, authority, audience and complete tree effects.
 This decoder performs no Git or GitHub effects and grants no permission.
+
+A removal uses the existing tree-patch alternative:
+
+```js
+{path: 'lib/legacy/consumed.md', remove: {mode: '100644', type: 'blob', sha: originalBlob}}
+```
+
+Its mode, type and object identity must equal the separately selected
+`reviewedSource.entries` preimage for that path. Explicit absence, mixed removal
+and byte fields, mode changes and duplicate paths refuse. The owning publisher
+must independently observe the original path, prove the complete receiving tree,
+and receive absence at the immutable merged commit before it reports deletion.
+Repeated absence by itself grants no removal authority.
+
+`SOURCE_TREE_PUBLICATION_LIMITS` exports the same frozen bounds used by this
+decoder: 128 selected paths, 2 MiB per output blob and 8 MiB total output bytes,
+with corresponding canonical-base64 limits. Removals count toward the path
+bound. This lets effect owners refuse oversized local files before reading them;
+it does not widen either source-tree proof or publication limits.
 
 Source-only requests currently require a single-line commit message; native
 publication retains its previous message behavior. The ordinary commit-paths
