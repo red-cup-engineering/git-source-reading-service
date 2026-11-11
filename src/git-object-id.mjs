@@ -4,6 +4,9 @@ import { createHash } from "node:crypto";
 /** The git blob id of some bytes: the address git gives the same content in any repository. */
 export const gitBlobIdOf = (bytes) => createHash("sha1").update(`blob ${bytes.length}\0`).update(bytes).digest("hex");
 
+/** The git commit id of a raw commit object, the bytes `git cat-file commit` prints. */
+export const gitCommitIdOf = (bytes) => createHash("sha1").update(`commit ${bytes.length}\0`).update(bytes).digest("hex");
+
 /** Native SHA-1 Git tree identity for immediate entries, independent of input order. */
 export function gitTreeIdOf(entries) {
   if (!Array.isArray(entries)) throw new TypeError('Git tree entries must be an array');

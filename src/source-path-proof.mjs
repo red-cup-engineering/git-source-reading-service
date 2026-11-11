@@ -1,4 +1,4 @@
-import {gitTreeIdOf} from './git-object-id.mjs';
+import {gitBlobIdOf,gitCommitIdOf,gitTreeIdOf} from './git-object-id.mjs';
 
 const types={'040000':'tree','100644':'blob','100755':'blob','120000':'blob','160000':'commit'};
 /** Validate an immediate tree against its native Git identity. */
@@ -41,4 +41,28 @@ export function readEvidenceBoundPathProof({commit,path,proof}={}) {
     expected=row.sha;
   }
   throw new TypeError('path proof did not terminate');
+}
+/** Bind a pinned commit to its root tree by hashing the raw commit object, so a path proof
+ *  starts at the commit a reader selected and takes no tree identity on trust. */
+export function readEvidenceBoundCommit({sha,object}={}) {
+  if(!/^[a-f0-9]{40}$/u.test(sha??'')||!(object instanceof Uint8Array)||object.length>1024*1024)
+    throw new TypeError('pinned commit and its raw object required');
+  if(gitCommitIdOf(object)!==sha)throw new TypeError('commit object does not match its pinned identity');
+  const tree=/^tree ([a-f0-9]{40})\n/u.exec(Buffer.from(object.subarray(0,46)).toString('latin1'))?.[1];
+  if(!tree)throw new TypeError('commit object does not open with its root tree');
+  return {sha,tree:{sha:tree}};
+}
+/** Verify bytes as the regular file at a path of a pinned commit: the commit object, each
+ *  immediate tree down the path, the blob, then the bytes. Reads no repository, so bytes
+ *  received from a registry archive can be checked where their repository cannot be read. */
+export function readEvidenceBoundSourceMember({commit,path,proof,bytes}={}) {
+  if(!(bytes instanceof Uint8Array)||typeof path!=='string'||!path)
+    throw new TypeError('source member path and bytes required');
+  const bound=readEvidenceBoundCommit(commit);
+  const reading=readEvidenceBoundPathProof({commit:bound,path,proof});
+  if(reading.scope!=='observed'||!['100644','100755'].includes(reading.entry.mode))
+    throw new TypeError('path proof does not reach a regular file');
+  if(gitBlobIdOf(bytes)!==reading.entry.sha)
+    throw new TypeError('bytes are not the blob at that path of the pinned commit');
+  return {commit:bound.sha,tree:bound.tree.sha,path,mode:reading.entry.mode,blob:reading.entry.sha};
 }

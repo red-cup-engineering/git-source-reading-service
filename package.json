@@ -47,6 +47,7 @@
     "test/pinned-source-files.test.mjs",
     "test/pinned-worktree.test.mjs",
     "test/read-source-files.test.mjs",
+    "test/source-member-proof.test.mjs",
     "test/source-path-proof.test.mjs",
     "test/source-tree-patch.test.mjs"
   ]

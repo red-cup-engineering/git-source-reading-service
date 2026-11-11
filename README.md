@@ -24,6 +24,34 @@ the moved proof tests are included in the native package's `receivingTests` so
 an installed consumer can qualify the same source, including the authentic
 `git filter-repo` prerequisite described below.
 
+### A source member, proved without its repository
+
+A consumer that selected an exact commit can check that bytes it received
+elsewhere, such as a file in a registry archive, are the file at a path of
+that commit, without reading the repository:
+
+```js
+import { readEvidenceBoundSourceMember } from "@red-cup-engineering/git-source-reading-service/source-path-proof";
+
+readEvidenceBoundSourceMember({ commit: { sha, object }, path, proof, bytes });
+// { commit, tree, path, mode, blob }, or a TypeError
+```
+
+`sha` is the commit the consumer pinned. `object` is that commit's raw object
+and `proof` is each immediate tree from the root down the path. The function
+hashes the commit object to `sha`, each tree to the identity its parent names,
+and `bytes` to the blob the last tree names, so the evidence can come from
+anyone and still proves nothing unless every link holds. `gitCommitIdOf` in
+`./git-object-id` and `readEvidenceBoundCommit` are the first link alone.
+
+An owner who can read the repository produces the evidence once with
+`readSourcePathProofSync({ directory, commit, path })` from
+`./pinned-source-files`, and carries `commit.object` as base64 where it
+travels as JSON. The evidence shows the commit's headers and message and the
+entry names and object identities of each directory on the path, so publishing
+it for a private repository discloses those. It proves where bytes sit in a
+commit. It does not prove that an archive is complete, or who made the commit.
+
 <!-- 561-group-standards:badges:start -->
 [![Red Cup Engineering](https://img.shields.io/badge/561%20Group-Red%20Cup%20Engineering-c0392b)](https://github.com/red-cup-engineering)
 [![License: MIT](https://img.shields.io/badge/license-MIT-c0392b)](LICENSE)

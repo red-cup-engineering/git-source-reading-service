@@ -5,6 +5,7 @@ import { createHash } from "node:crypto";
 import { isAbsolute, join, posix, dirname, resolve } from "node:path";
 import { readTreeEntries, takeBatchRecord, readIndexEntries, gitWorktreePlan } from "./git-command-codec.mjs";
 import { composed, containedGitmodulePath, parseGitmodules } from "./gitmodules.mjs";
+import { readEvidenceBoundCommit } from "./source-path-proof.mjs";
 
 const oid = value => typeof value === "string" && /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/u.test(value);
 // Factories in one process share initialization custody, never credentials or
@@ -525,6 +526,26 @@ export function receivePinnedRepositoryCommitSync({ directory, repository, commi
   run(pinnedCommitFetchArguments(commit),{transfer:true});
   run(["cat-file","-e",commit+"^{commit}"]);
   return {directory,repository,commit,fetched:true};
+}
+/** Read, from an existing repository, the evidence that binds one path to an exact
+ * commit: the raw commit object and each immediate tree down the path. Strictly
+ * local. readEvidenceBoundSourceMember verifies the result without a repository;
+ * carry `commit.object` as base64 where the evidence travels as JSON. */
+export function readSourcePathProofSync({ directory, commit, path, ...options } = {}) {
+  if (!/^[0-9a-f]{40}$/u.test(commit ?? "") || typeof path !== "string" || !path || /[\0\\]/u.test(path)
+      || path.split("/").some(part => !part || [".", "..", ".git"].includes(part)))
+    throw new TypeError("an exact SHA-1 commit and a contained source path are required");
+  const run = nativeGit(directory, options), object = run(["cat-file", "commit", commit]);
+  const parts = path.split("/"), proof = [];
+  let tree = readEvidenceBoundCommit({ sha:commit, object }).tree.sha;
+  for (let index = 0; index < parts.length; index++) {
+    const rows = readTreeEntries(run(["ls-tree", "-z", tree]), 100000);
+    proof.push({ sha:tree, truncated:false, tree:rows.map(row => ({ path:row.path, mode:row.mode, type:row.type, sha:row.object })) });
+    const row = rows.find(entry => entry.path === parts[index]);
+    if (row?.type !== "tree") break;
+    tree = row.object;
+  }
+  return { commit:{ sha:commit, object }, path, proof };
 }
 /** Read exact selected binary blobs from an existing repository. The default
  * is strictly local. Explicit receiving hydrates only missing selected OIDs
