@@ -22,7 +22,6 @@
     "src",
     "README.md",
     "test",
-    "docs/API.md",
     "examples/quickstart.test.mjs"
   ],
   "engines": {
